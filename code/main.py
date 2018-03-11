@@ -72,6 +72,19 @@ if __name__ == "__main__":
         algo = GANTrainer(output_dir)
         algo.train(dataloader, cfg.STAGE)
     else:
-        datapath= '%s/test/val_captions.t7' % (cfg.DATA_DIR)
+        #datapath= '%s/test/val_captions.t7' % (cfg.DATA_DIR)
+        image_transform = transforms.Compose([
+            transforms.RandomCrop(cfg.IMSIZE),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])        
+        dataset = TextDataset(cfg.DATA_DIR, 'test',
+                              imsize=cfg.IMSIZE,
+                              transform=image_transform)
+        assert dataset
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=cfg.TRAIN.BATCH_SIZE * num_gpu,
+            drop_last=True, shuffle=True, num_workers=int(cfg.WORKERS))        
+        
         algo = GANTrainer(output_dir)
-        algo.sample(datapath, cfg.STAGE)
+        algo.sample(dataloader, cfg.STAGE)

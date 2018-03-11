@@ -17,6 +17,10 @@ __C.GPU_ID = '0'
 __C.CUDA = True
 __C.WORKERS = 6
 
+__C.ENCODER = ''
+__C.DECODER = ''
+__C.IMAGE_ENCODER = ''
+
 __C.NET_G = ''
 __C.NET_D = ''
 __C.STAGE1_G = ''

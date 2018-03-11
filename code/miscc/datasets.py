@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import pdb
 
 import torch.utils.data as data
 from PIL import Image
@@ -35,7 +36,7 @@ class TextDataset(data.Dataset):
         self.filenames = self.load_filenames(split_dir)
         self.embeddings = self.load_embedding(split_dir, embedding_type)
         self.class_id = self.load_class_id(split_dir, len(self.filenames))
-        # self.captions = self.load_all_captions()
+        self.captions = self.load_all_captions()
 
     def get_img(self, img_path, bbox):
         img = Image.open(img_path).convert('RGB')
@@ -136,16 +137,21 @@ class TextDataset(data.Dataset):
             bbox = None
             data_dir = self.data_dir
 
-        # captions = self.captions[key]
-        embeddings = self.embeddings[index, :, :]
+        captions = self.captions[key]
+        #embeddings = self.embeddings[index, :, :]
         img_name = '%s/images/%s.jpg' % (data_dir, key)
         img = self.get_img(img_name, bbox)
 
-        embedding_ix = random.randint(0, embeddings.shape[0]-1)
-        embedding = embeddings[embedding_ix, :]
-        if self.target_transform is not None:
-            embedding = self.target_transform(embedding)
-        return img, embedding
+        #embedding_ix = random.randint(0, embeddings.shape[0]-1)
+        #embedding = embeddings[embedding_ix, :]
+        
+        embedding_ix = random.randint(0, len(captions)-1)
+        caption = captions[embedding_ix]
+        #print(self.embeddings.shape, len(caption), len(self.filenames))
+        #if self.target_transform is not None:
+        #    embedding = self.target_transform(embedding)
+        #return img, embedding, caption
+        return img, [], caption
 
     def __len__(self):
         return len(self.filenames)

@@ -70,7 +70,7 @@ if __name__ == "__main__":
             drop_last=True, shuffle=True, num_workers=int(cfg.WORKERS))
 
         algo = GANTrainer(output_dir)
-        algo.train(dataloader, cfg.STAGE)
+        algo.train(dataloader, dataset, cfg.STAGE)
     else:
         #datapath= '%s/test/val_captions.t7' % (cfg.DATA_DIR)
         image_transform = transforms.Compose([

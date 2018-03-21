@@ -5,7 +5,11 @@ from __future__ import unicode_literals
 
 import pdb
 
+import torch
 import torch.utils.data as data
+from torch import nn
+from torch.autograd import Variable
+
 from PIL import Image
 import PIL
 import os
@@ -34,9 +38,11 @@ class TextDataset(data.Dataset):
         split_dir = os.path.join(data_dir, split)
 
         self.filenames = self.load_filenames(split_dir)
-        self.embeddings = self.load_embedding(split_dir, embedding_type)
+        self.embeddings = [] #self.load_embedding(split_dir, embedding_type)
         self.class_id = self.load_class_id(split_dir, len(self.filenames))
         self.captions = self.load_all_captions()
+        
+        self.pred_captions = {}
 
     def get_img(self, img_path, bbox):
         img = Image.open(img_path).convert('RGB')
@@ -71,7 +77,7 @@ class TextDataset(data.Dataset):
         #
         filename_bbox = {img_file[:-4]: [] for img_file in filenames}
         numImgs = len(filenames)
-        for i in xrange(0, numImgs):
+        for i in range(0, numImgs):
             # bbox = [x-left, y-top, width, height]
             bbox = df_bounding_boxes.iloc[i][1:].tolist()
 
@@ -91,7 +97,7 @@ class TextDataset(data.Dataset):
     def load_captions(self, caption_name):
         cap_path = caption_name
         with open(cap_path, "r") as f:
-            captions = f.read().decode('utf8').split('\n')
+            captions = f.read().split('\n') #.decode('utf8').split('\n')
         captions = [cap.replace("\ufffd\ufffd", " ")
                     for cap in captions if len(cap) > 0]
         return captions
@@ -114,7 +120,7 @@ class TextDataset(data.Dataset):
     def load_class_id(self, data_dir, total_num):
         if os.path.isfile(data_dir + '/class_info.pickle'):
             with open(data_dir + '/class_info.pickle', 'rb') as f:
-                class_id = pickle.load(f)
+                class_id = pickle.load(f, encoding='bytes')
         else:
             class_id = np.arange(total_num)
         return class_id
@@ -125,6 +131,11 @@ class TextDataset(data.Dataset):
             filenames = pickle.load(f)
         print('Load filenames from: %s (%d)' % (filepath, len(filenames)))
         return filenames
+    
+    def save_captions(self, keys, inds, lens):
+        '''saves sentence predictions from real imgs, for img->img cycle'''
+        for i_k, k in enumerate(keys):
+            self.pred_captions[k] = (inds[i_k], lens[i_k])
 
     def __getitem__(self, index):
         key = self.filenames[index]
@@ -141,6 +152,11 @@ class TextDataset(data.Dataset):
         #embeddings = self.embeddings[index, :, :]
         img_name = '%s/images/%s.jpg' % (data_dir, key)
         img = self.get_img(img_name, bbox)
+        
+        if key in self.pred_captions:
+            pred_cap = self.pred_captions[key]
+        else:
+            pred_cap = []
 
         #embedding_ix = random.randint(0, embeddings.shape[0]-1)
         #embedding = embeddings[embedding_ix, :]
@@ -151,7 +167,7 @@ class TextDataset(data.Dataset):
         #if self.target_transform is not None:
         #    embedding = self.target_transform(embedding)
         #return img, embedding, caption
-        return img, [], caption
+        return key, img, [], caption, pred_cap
 
     def __len__(self):
         return len(self.filenames)

@@ -9,6 +9,37 @@ import pdb
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence#, masked_cross_entropy
 
+class EncodingDiscriminator(nn.Module):
+
+    def __init__(self, emb_dim):
+        super(EncodingDiscriminator, self).__init__()
+
+        self.emb_dim = emb_dim
+        self.dis_layers = 3
+        self.dis_hid_dim = 1024
+        self.dis_dropout = 0.0
+        self.dis_input_dropout = 0.0
+
+        layers = [nn.Dropout(self.dis_input_dropout)]
+        for i in range(self.dis_layers + 1):
+            input_dim = self.emb_dim if i == 0 else self.dis_hid_dim
+            output_dim = 1 if i == self.dis_layers else self.dis_hid_dim
+            layers.append(nn.Linear(input_dim, output_dim))
+            if i < self.dis_layers:
+                layers.append(nn.LeakyReLU(0.2))
+                layers.append(nn.Dropout(self.dis_dropout))
+                
+        #layers.append(nn.LogSigmoid())
+        
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        #assert x.dim() == 3 and x.size(2) == self.emb_dim
+        l = self.layers(x)
+        #return l.view(-1)
+        #return torch.exp(torch.sum(l, dim=0))
+        return l
+
 class STAGE1_ImageEncoder(nn.Module):
     def __init__(self):
         super(STAGE1_ImageEncoder, self).__init__()
@@ -34,20 +65,30 @@ class STAGE1_ImageEncoder(nn.Module):
             nn.Conv2d(ndf*4, ndf * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 8),
             # state size (ndf * 8) x 4 x 4)
-            nn.LeakyReLU(0.2, inplace=True)
-            #nn.MaxPool2d(2, stride=2)#,
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.MaxPool2d(2, stride=2),
             #nn.Linear(1024, 300)
         )
         
-        self.linear = nn.Linear(96 * self.batch_size, 300 * 2)
+        # self.encode_img = nn.Sequential(
+        #     nn.Linear(64 * 64 * 3, 1024),
+        #     nn.LeakyReLU(0.2, inplace=True)
+        # )
+        
+        #self.linear = nn.Linear(96 * self.batch_size, 300 * 2)
+        #self.linear = nn.Linear(1024, 300 * 2)
+        self.l1 = nn.Linear(768 * 2 * 2, 300)
+        self.l2 = nn.Linear(768 * 2 * 2, 300)
 
-        self.get_cond_logits = D_GET_LOGITS(ndf, nef)
-        self.get_uncond_logits = D_GET_LOGITS(ndf, nef, bcondition=False)
+        # self.get_cond_logits = D_GET_LOGITS(ndf, nef)
+        # self.get_uncond_logits = D_GET_LOGITS(ndf, nef, bcondition=False)
 
     def forward(self, image):
-        img_embedding = self.encode_img(image)
-        emb = self.linear(img_embedding.view(self.batch_size, -1))
-        return emb.view(2, self.batch_size, -1)
+        img_embedding = self.encode_img(image)#.view(-1, 64 * 64 * 3))
+        #emb = self.linear(img_embedding.view(-1, 1024))
+        mu = self.l1(img_embedding.view(-1, 768 * 2 * 2))
+        logvar = self.l2(img_embedding.view(-1, 768 * 2 * 2))
+        return mu, logvar
 
 class EncoderRNN(nn.Module):
     def __init__(self, hidden_size, src_emb, n_layers=1, dropout=0.1):
@@ -252,7 +293,8 @@ class D_GET_LOGITS(nn.Module):
         else:
             self.outlogits = nn.Sequential(
                 nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=4),
-                nn.Sigmoid())
+                #nn.Sigmoid())
+            )
 
     def forward(self, h_code, c_code=None):
         # conditioning output
@@ -278,7 +320,9 @@ class STAGE1_G(nn.Module):
         self.define_module()
 
     def define_module(self):
-        ninput = self.z_dim + self.ef_dim
+        #ninput = self.z_dim + self.ef_dim
+        ninput = 300
+        
         ngf = self.gf_dim
         # TEXT.DIMENSION -> GAN.CONDITION_DIM
         self.ca_net = CA_NET()
@@ -301,10 +345,15 @@ class STAGE1_G(nn.Module):
         self.img = nn.Sequential(
             conv3x3(ngf // 16, 3),
             nn.Tanh())
+        
+        self.l1 = nn.Linear(300, 1024)
+        self.r1 = nn.ReLU(True)
+        self.l2 = nn.Linear(1024, 64 * 64 * 3)
 
     def forward(self, text_embedding, noise):
-        c_code, mu, logvar = self.ca_net(text_embedding)
-        z_c_code = torch.cat((noise, c_code), 1)
+        #c_code, mu, logvar = self.ca_net(text_embedding)
+        #z_c_code = torch.cat((noise, c_code), 1)
+        z_c_code = text_embedding
         h_code = self.fc(z_c_code)
 
         h_code = h_code.view(-1, self.gf_dim, 4, 4)
@@ -314,7 +363,10 @@ class STAGE1_G(nn.Module):
         h_code = self.upsample4(h_code)
         # state size 3 x 64 x 64
         fake_img = self.img(h_code)
-        return None, fake_img, mu, logvar
+
+        #fake_img = self.l2(self.r1(self.l1(text_embedding))).view(128, 3, 64, 64)
+        
+        return None, fake_img, None, None #mu, logvar
 
 
 class STAGE1_D(nn.Module):

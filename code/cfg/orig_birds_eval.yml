@@ -1,0 +1,27 @@
+CONFIG_NAME: 'stageII'
+
+DATASET_NAME: 'birds'
+EMBEDDING_TYPE: 'cnn-rnn'
+GPU_ID: '0,1'
+Z_DIM: 100
+#NET_G: '../output/birds_stageI_2018_03_05_15_55_50/Model/netG_epoch_120.pth'
+#NET_G: '../output/birds_stageI_2018_03_07_17_52_28/Model/netG_epoch_120.pth'
+#NET_G: '../output/birds_stageI_2018_03_08_15_09_15/Model/netG_epoch_120.pth'
+NET_G: '../output/birds_stageI_2018_03_05_15_55_50/Model/netG_epoch_120.pth'
+
+DATA_DIR: '../data/birds'
+WORKERS: 4
+IMSIZE: 64
+STAGE: 1
+TRAIN:
+    FLAG: False
+    BATCH_SIZE: 128
+
+GAN:
+    CONDITION_DIM: 128
+    DF_DIM: 96
+    GF_DIM: 192
+    R_NUM: 2
+
+TEXT:
+    DIMENSION: 1024

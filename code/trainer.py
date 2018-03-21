@@ -54,7 +54,8 @@ class GANTrainer(object):
         torch.cuda.set_device(self.gpus[0])
         cudnn.benchmark = True
         
-        path = "../data/birds/birds.en.vec"
+        #path = "../data/birds/birds.en.vec"
+        path = os.path.join(cfg.DATA_DIR, cfg.DATASET_NAME + ".en.vec")
         txt_dico, _txt_emb = load_external_embeddings(path)
         #params.src_dico = src_dico
         txt_emb = nn.Embedding(len(txt_dico), 300, sparse=False)
@@ -102,7 +103,7 @@ class GANTrainer(object):
         i = 0
         seq = []
         for cl in chopped_lens:
-            zeros = torch.zeros(max_len - cl).long() # should this be padding?
+            zeros = torch.ones(max_len - cl).long() * self.txt_dico.PAD_TOKEN #torch.zeros(max_len - cl).long() # should this be padding?
             zeros = zeros.cuda() if cfg.CUDA else zeros
             seq.append(torch.cat((masked[i:i+cl],zeros)))
             i += cl
@@ -143,7 +144,7 @@ class GANTrainer(object):
 
     # ############# For training stageI GAN #############
     def load_network_stageI(self):
-        from model import STAGE1_G, STAGE1_D, EncoderRNN, LuongAttnDecoderRNN, STAGE1_ImageEncoder
+        from model import STAGE1_G, STAGE1_D, EncoderRNN, LuongAttnDecoderRNN, STAGE1_ImageEncoder, EncodingDiscriminator
         netG = STAGE1_G()
         netG.apply(weights_init)
         #print(netG)
@@ -162,6 +163,8 @@ class GANTrainer(object):
         
         image_encoder = STAGE1_ImageEncoder()
         image_encoder.apply(weights_init)
+        
+        e_disc = EncodingDiscriminator(emb_dim)
 
         if cfg.NET_G != '':
             state_dict = \
@@ -200,8 +203,9 @@ class GANTrainer(object):
             encoder.cuda()
             decoder.cuda()
             image_encoder.cuda()
+            e_disc.cuda()
             
-        return netG, netD, encoder, decoder, image_encoder
+        return netG, netD, encoder, decoder, image_encoder, e_disc
 
     # ############# For training stageII GAN  #############
 #     def load_network_stageII(self):
@@ -242,9 +246,9 @@ class GANTrainer(object):
 #             netD.cuda()
 #         return netG, netD
 
-    def train(self, data_loader, stage=1):
+    def train(self, data_loader, dataset, stage=1):
         if stage == 1:
-            netG, netD, encoder, decoder, image_encoder = self.load_network_stageI()
+            netG, netD, encoder, decoder, image_encoder, enc_disc = self.load_network_stageI()
         else:
             netG, netD = self.load_network_stageII()
 
@@ -279,23 +283,33 @@ class GANTrainer(object):
         enc_optimizer = optim_fn(enc_params, **optim_params)
         optim_fn, optim_params = get_optimizer("adam,lr=0.001")
         dec_params = filter(lambda p: p.requires_grad, decoder.parameters())
-        dec_optimizer = optim_fn(dec_params, **optim_params)        
+        dec_optimizer = optim_fn(dec_params, **optim_params)
         
+        # image_enc_optimizer = \
+        #     optim.Adam(image_encoder.parameters(),
+        #                lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
         image_enc_optimizer = \
-            optim.Adam(image_encoder.parameters(),
-                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))        
+            optim.SGD(image_encoder.parameters(),
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR)            
+            
+        enc_disc_optimizer = \
+            optim.Adam(enc_disc.parameters(),
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
         
         count = 0
         
-        criterionCycle = torch.nn.L1Loss()
+        criterionCycle = torch.nn.SmoothL1Loss()
+        #criterionCycle = torch.nn.BCELoss()
         
         for epoch in range(self.max_epoch):
+
+            
             start_t = time.time()
             if epoch % lr_decay_step == 0 and epoch > 0:
-                generator_lr *= 0.5
+                generator_lr *= 0.75
                 for param_group in optimizerG.param_groups:
                     param_group['lr'] = generator_lr
-                discriminator_lr *= 0.5
+                discriminator_lr *= 0.75
                 for param_group in optimizerD.param_groups:
                     param_group['lr'] = discriminator_lr
 
@@ -303,7 +317,8 @@ class GANTrainer(object):
                 ######################################################
                 # (1) Prepare training data
                 ######################################################
-                real_img_cpu, txt_embedding, captions = data
+                _, real_img_cpu, _, captions, pred_cap = data
+
                 raw_inds, raw_lengths = self.process_captions(captions)
                 inds, lengths = self.add_noise(raw_inds.data, raw_lengths)
                 inds = Variable(inds)
@@ -313,7 +328,10 @@ class GANTrainer(object):
                 real_imgs = Variable(real_img_cpu)
                 #txt_embedding = Variable(txt_embedding)
                 
-                txt_embedding = encoder_hidden[0]
+                std_t = encoder_hidden[1].mul(0.5).exp_()
+                eps_t = Variable(std_t.data.new(std_t.size()).normal_())
+                txt_embedding = eps_t.mul(std_t).add_(encoder_hidden[0])                
+                #txt_embedding = encoder_hidden[0]
                 
                 if cfg.CUDA:
                     real_imgs = real_imgs.cuda()
@@ -353,14 +371,21 @@ class GANTrainer(object):
                 # (2c) Decode z from real imgs and calc auto-encoding loss
                 ######################################################                    
                 
-                real_features = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)
-                             
+                real_features = nn.parallel.data_parallel(image_encoder, (real_imgs[sort_idx]), self.gpus)
+                # reparameterize
+                std_z = real_features[1].mul(0.5).exp_()
+                eps_z = Variable(std_z.data.new(std_z.size()).normal_())
+                real_z = eps_z.mul(std_z).add_(real_features[0])
+
                 noise.data.normal_(0, 1)
-                inputs = (real_features[0], noise)
+                inputs = (real_z, noise)
                 _, fake_from_real_img, mu, logvar = \
                     nn.parallel.data_parallel(netG, inputs, self.gpus)            
                 
-                loss_img = criterionCycle(fake_from_real_img, real_imgs)
+                loss_img = criterionCycle(F.sigmoid(fake_from_real_img), F.sigmoid(real_imgs[sort_idx]))
+                                                    
+                # loss_img = F.binary_cross_entropy_with_logits(fake_from_real_img.view(batch_size, -1),
+                #                                               real_imgs.view(batch_size, -1))
                 
                 #######################################################
                 # (2c) Decode z from fake imgs and calc cycle loss
@@ -372,7 +397,10 @@ class GANTrainer(object):
                 cd_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
                 cd_dec_inp = cd_dec_inp.cuda() if cfg.CUDA else cd_dec_inp
                 
-                cd_dec_hidden = fake_features # check feat length
+                cd_mu, cd_logvar = fake_features
+                #cd_dec_hidden = fake_features # check feat length
+                
+                cd_dec_hidden = torch.cat((cd_mu.unsqueeze(0), cd_logvar.unsqueeze(0)))
 
                 max_target_length = 20
 
@@ -385,80 +413,213 @@ class GANTrainer(object):
                     loss_cd = loss_cd + F.cross_entropy(cd_dec_out, inds[:,sort_idx][t], ignore_index=self.txt_dico.PAD_TOKEN)
                     cd_dec_inp = inds[:,sort_idx][t]
 
-                loss_cd = loss_cd / lengths.float().sum()                  
+                loss_cd = loss_cd / lengths.float().sum()
                 
-                #######################################################
-                # (2d) Update encoder/decoder
-                ######################################################                  
-                encoder.zero_grad()
-                decoder.zero_grad()
+                ###############################################################
+                # (2d) Generate image from predicted cap, calc img cycle loss
+                ###############################################################
                 
-                loss_auto.backward(retain_graph=True)
-                
-                enc_optimizer.step()
-                dec_optimizer.step()
+                loss_cycle_img = 0
+                if (len(pred_cap)):
+                    pred_inds, pred_lens = pred_cap
+                    pred_inds = Variable(pred_inds.transpose(0,1))
+                    pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
+                                        
+                    pred_out, pred_hidden = encoder(pred_inds[:, sort_idx], pred_lens.cpu().numpy(), None)
+
+                    # reparameterize
+                    std_p = pred_hidden[1].mul(0.5).exp_()
+                    eps_p = Variable(std_p.data.new(std_p.size()).normal_())
+                    real_p = eps_p.mul(std_p).add_(pred_hidden[0])
+                    
+                    noise.data.normal_(0, 1)
+                    inputs = (real_p, noise)
+                    _, fake_from_fake_img, mu, logvar = \
+                        nn.parallel.data_parallel(netG, inputs, self.gpus)
+
+                    loss_cycle_img = criterionCycle(F.sigmoid(fake_from_fake_img), F.sigmoid(real_imgs[sort_idx]))
                 
                 ############################
                 # (3) Update D network
                 ###########################
                 netD.zero_grad()
+                enc_disc.zero_grad()
+                
                 # errD, errD_real, errD_wrong, errD_fake = \
                 #     compute_discriminator_loss(netD, real_imgs, fake_imgs,
                 #                                real_labels, fake_labels,
                 #                                mu, self.gpus)
-                errD, errD_real, errD_fake = \
+                errD_im, errD_real, errD_fake = \
                     compute_discriminator_loss_cycle(netD, real_imgs, fake_imgs,
                                                      real_labels, fake_labels,
                                                      mu, self.gpus)
+                    
+                txt_enc_labels = Variable(torch.FloatTensor(batch_size).fill_(0)) 
+                img_enc_labels = Variable(torch.FloatTensor(batch_size).fill_(1)) 
+                if cfg.CUDA:
+                    txt_enc_labels = txt_enc_labels.cuda()
+                    img_enc_labels = img_enc_labels.cuda()
+                
+                _, disc_hidden = encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
+                di_mu, di_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)
+                disc_img = torch.cat((di_mu.unsqueeze(0), di_logvar.unsqueeze(0)))
+                
+                pred_txt = enc_disc(disc_hidden)
+                pred_img = enc_disc(disc_img)
+                enc_disc_loss_txt =  F.binary_cross_entropy_with_logits( pred_txt[0].squeeze(), txt_enc_labels)
+                enc_disc_loss_img = F.binary_cross_entropy_with_logits( pred_img[0].squeeze(), img_enc_labels)
+                
+                errD = errD_im + enc_disc_loss_txt + enc_disc_loss_img
+                
+                # check NaN
+                if (errD != errD).data.any():
+                    print("NaN detected (discriminator)")
+                    pdb.set_trace()
+                    exit()                
+                    
                 errD.backward()
                 optimizerD.step()
+                enc_disc_optimizer.step()
                 ############################
                 # (2) Update G network
                 ###########################
+                encoder.zero_grad()
+                decoder.zero_grad()                
                 netG.zero_grad()
                 image_encoder.zero_grad()
                 
                 errG = compute_generator_loss(netD, fake_imgs,
                                               real_labels, mu, self.gpus)
-                kl_loss = KL_loss(mu, logvar)
-                errG_total = errG + kl_loss * cfg.TRAIN.COEFF.KL + loss_cd + loss_img
+                real_features = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)
+                #kl_loss = KL_loss(mu, logvar)
+                try:
+                    img_kl_loss = KL_loss(real_features[0], real_features[1])
+                except:
+                    pdb.set_trace()
+                try:
+                    txt_kl_loss = KL_loss(encoder_hidden[0], encoder_hidden[1]) 
+                except:
+                    pdb.set_trace()
+                kl_loss = img_kl_loss + txt_kl_loss
+                #kl_loss = 0
+                
+                _, disc_hidden_g = encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
+                dg_mu, dg_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)                
+                disc_img_g = torch.cat((dg_mu.unsqueeze(0), dg_logvar.unsqueeze(0)))
+                
+                pred_txt_g = enc_disc(disc_hidden_g)
+                pred_img_g = enc_disc(disc_img_g)
+                enc_fake_loss_txt =  F.binary_cross_entropy_with_logits( pred_img_g[0].squeeze(), txt_enc_labels)
+                enc_fake_loss_img = F.binary_cross_entropy_with_logits( pred_txt_g[0].squeeze(), img_enc_labels)                
+                                
+                errG_total = 0.5 * errG + kl_loss * cfg.TRAIN.COEFF.KL + 10 * loss_cd + 10 * loss_img + loss_auto + enc_fake_loss_txt + enc_fake_loss_img + loss_cycle_img
+                
+                # check NaN
+                if (errG_total != errG_total).data.any():
+                    print("NaN detected (generator)")
+                    pdb.set_trace()
+                    exit()                 
+                
                 errG_total.backward()
                 
                 optimizerG.step()
                 image_enc_optimizer.step()
+                enc_optimizer.step()
+                dec_optimizer.step()                
+                
 
                 count = count + 1
                 if i % 100 == 0:
-                    summary_D = summary.scalar('D_loss', errD.data[0])
-                    summary_D_r = summary.scalar('D_loss_real', errD_real)
-                    #summary_D_w = summary.scalar('D_loss_wrong', errD_wrong)
-                    summary_D_f = summary.scalar('D_loss_fake', errD_fake)
-                    summary_G = summary.scalar('G_loss', errG.data[0])
-                    summary_KL = summary.scalar('KL_loss', kl_loss.data[0])
+#                     summary_D = summary.scalar('D_loss', errD.data[0])
+#                     summary_D_r = summary.scalar('D_loss_real', errD_real)
+#                     #summary_D_w = summary.scalar('D_loss_wrong', errD_wrong)
+#                     summary_D_f = summary.scalar('D_loss_fake', errD_fake)
+#                     summary_G = summary.scalar('G_loss', errG.data[0])
+#                     #summary_KL = summary.scalar('KL_loss', kl_loss.data[0])
 
-                    self.summary_writer.add_summary(summary_D, count)
-                    self.summary_writer.add_summary(summary_D_r, count)
-                    #self.summary_writer.add_summary(summary_D_w, count)
-                    self.summary_writer.add_summary(summary_D_f, count)
-                    self.summary_writer.add_summary(summary_G, count)
-                    self.summary_writer.add_summary(summary_KL, count)
+#                     self.summary_writer.add_summary(summary_D, count)
+#                     self.summary_writer.add_summary(summary_D_r, count)
+#                     #self.summary_writer.add_summary(summary_D_w, count)
+#                     self.summary_writer.add_summary(summary_D_f, count)
+#                     self.summary_writer.add_summary(summary_G, count)
+#                     #self.summary_writer.add_summary(summary_KL, count)
 
                     # save the image result for each epoch
                     inputs = (txt_embedding, fixed_noise)
                     lr_fake, fake, _, _ = \
                         nn.parallel.data_parallel(netG, inputs, self.gpus)
-                    #save_img_results(real_img_cpu, fake, epoch, self.image_dir)
-                    #if lr_fake is not None:
-                    #    save_img_results(None, lr_fake, epoch, self.image_dir)
+                    save_img_results(real_imgs[sort_idx].data, fake_from_real_img, epoch, self.image_dir)
+                    if lr_fake is not None:
+                        save_img_results(None, lr_fake, epoch, self.image_dir)
+                                    
                         
+            # save pred caps for next iteration
+            for i, data in enumerate(data_loader, 0):
+                keys, real_img_cpu, _, _, _ = data
+                
+                cap_mu, cap_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs[sort_idx]), self.gpus)
+                cap_features = torch.cat((cap_mu.unsqueeze(0), cap_logvar.unsqueeze(0)))
+                cap_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
+                cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
+
+                cap_dec_hidden = cap_features.detach()
+
+                seq = torch.LongTensor([])
+                seq = seq.cuda() if cfg.CUDA else seq
+
+                max_target_length = 20
+                
+                lengths = torch.LongTensor(batch_size).fill_(20)
+
+                for t in range(max_target_length):
+
+                    cap_dec_out, cap_dec_hidden, cap_dec_attn = decoder(
+                        cap_dec_inp, cap_dec_hidden, cap_dec_hidden
+                    )
+
+                    topv, topi = cap_dec_out.topk(1, dim=1)
+
+                    #eos_inds = (topi == self.txt_dico.EOS_TOKEN)
+
+                    cap_dec_inp = topi #.squeeze(dim=2)
+                    cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
+
+                    seq = torch.cat((seq, cap_dec_inp.data), dim=1)
+
+                dataset.save_captions(keys, seq.cpu(), lengths.cpu())
+            
             end_t = time.time()
-            print('''[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f Loss_KL: %.4f Loss_cd: %.4f
-                     Loss_real: %.4f Loss_fake %.4f Loss_auto_enc: %.4f Loss_img: %.4f
-                     Total Time: %.2fsec
-                  '''
-                  % (epoch, self.max_epoch, i, len(data_loader),
-                     errD.data[0], errG.data[0], kl_loss.data[0], loss_cd.data[0],
-                     errD_real, errD_fake, loss_auto.data[0], loss_img.data[0], (end_t - start_t)))
+            
+            prefix = "E%d/%s, %.1fs" % (epoch, time.strftime('D%d %X'), (end_t-start_t))
+            gen_str = "G_all: %.3f Cy_T: %.3f AE_T: %.3f AE_I %.3f KL_T %.3f KL_I %.3f" % (
+                                                                         errG.data[0],
+                                                                         loss_cd.data[0],
+                                                                         loss_auto.data[0],
+                                                                         loss_img.data[0],
+                                                                         txt_kl_loss.data[0],
+                                                                         img_kl_loss.data[0]
+                                                                        )
+            
+            dis_str = "D_all: %.3f D_I: %.3f D_zT: %.3f D_zI: %.3f" % (
+                errD.data[0], 
+                errD_im.data[0],
+                enc_disc_loss_txt.data[0], 
+                enc_disc_loss_img.data[0]
+            )
+
+            if hasattr(loss_cycle_img, 'data'):
+                gen_str += " CyI: %.3f" % (loss_cycle_img.data[0])
+                
+            print("%s %s, %s" % (prefix, gen_str, dis_str))
+            
+            # print('''[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f Loss_KL: %.4f Loss_cd: %.4f
+            #          Loss_real: %.4f Loss_fake %.4f Loss_auto_enc: %.4f Loss_img: %.4f
+            #          Total Time: %.2fsec
+            #       '''
+            #       % (epoch, self.max_epoch, i, len(data_loader),
+            #          errD.data[0], errG.data[0], kl_loss.data[0], loss_cd.data[0],
+            #          errD_real, errD_fake, loss_auto.data[0], loss_img.data[0], (end_t - start_t)))
+            
             if epoch % self.snapshot_interval == 0:
                 save_model(netG, netD, encoder, decoder, image_encoder, epoch, self.model_dir)
         #
@@ -466,9 +627,16 @@ class GANTrainer(object):
         #
         self.summary_writer.close()
 
+    ############################################################################################################
+    #
+    # INFERENCE
+    #
+    ############################################################################################################
+    
+    
     def sample(self, data_loader, stage=1):
         if stage == 1:
-            netG, _, encoder, decoder, image_encoder = self.load_network_stageI()
+            netG, _, encoder, decoder, image_encoder, _ = self.load_network_stageI()
         else:
             netG, _ = self.load_network_stageII()
         netG.eval()
@@ -476,13 +644,18 @@ class GANTrainer(object):
         # for i, data in enumerate(data_loader, 0):
         #     real_img_cpu, txt_embedding, captions = data
         
-        with open("test128.pkl", "rb") as f:
+        with open("test128_%s.pkl" % (cfg.DATASET_NAME), "rb") as f:
             data = pickle.load(f)
             #pickle.dump(data, f)
 
         real_img_cpu, txt_embedding, captions = data
         real_imgs = Variable(real_img_cpu)
         #txt_embedding = Variable(txt_embedding)
+                
+        # real_imgs = real_imgs2[:1].repeat(4,1,1,1)   
+        # captions = [captions[0],captions[0],captions[0],captions[0]
+        #            ]
+        # self.batch_size = 4
 
         inds, lengths = self.process_captions(captions)
         lens_sort, sort_idx = lengths.sort(0, descending=True)
@@ -508,7 +681,7 @@ class GANTrainer(object):
         
         # path to save generated samples
         #save_dir = cfg.NET_G[:cfg.NET_G.find('.pth')]
-        save_dir = "/playpen1/aji/stackcycle_results/%s/" % (cfg.DATASET_NAME)
+        save_dir = "/playpen1/aji/stackcycle2_results/%s/" % (cfg.DATASET_NAME)
         mkdir_p(save_dir)
 
         #batch_size = np.minimum(num_embeddings, self.batch_size)
@@ -545,7 +718,7 @@ class GANTrainer(object):
         seq = seq.cuda() if cfg.CUDA else seq          
 
         max_target_length = 20
-
+        
         for t in range(max_target_length):
 
             auto_dec_out, auto_dec_hidden, auto_dec_attn = decoder(
@@ -568,7 +741,7 @@ class GANTrainer(object):
                 if i == self.txt_dico.EOS_TOKEN:
                     break
                 if i != self.txt_dico.SOS_TOKEN:
-                    s += unicode(self.txt_dico.id2word[i].decode("utf-8")) + u" "
+                    s += self.txt_dico.id2word[i] + u" "
             auto_captions.append(s)
             
         save_name = "%s/auto_encoded.txt" % (save_dir)
@@ -580,8 +753,13 @@ class GANTrainer(object):
         #######################################################
         # (2) Generate fake images
         ######################################################
+        
+        std_f = encoder_hidden[1].mul(0.5).exp_()
+        eps_f = Variable(std_f.data.new(std_f.size()).normal_())
+        real_f = eps_f.mul(std_f).add_(encoder_hidden[0])        
+        
         noise.data.normal_(0, 1)
-        inputs = (txt_embedding, noise)
+        inputs = (real_f, noise)
         _, fake_imgs, mu, logvar = \
             nn.parallel.data_parallel(netG, inputs, self.gpus)
                         
@@ -621,13 +799,13 @@ class GANTrainer(object):
         # cycle
         #######################################################
         
-        fake_features = nn.parallel.data_parallel(image_encoder, (fake_imgs), self.gpus)
+        fake_mu, fake_logvar = nn.parallel.data_parallel(image_encoder, (fake_imgs), self.gpus)
         
         cy_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
         cy_dec_inp = cy_dec_inp.cuda() if cfg.CUDA else cy_dec_inp
         #cy_dec_hidden = encoder_hidden[:decoder.n_layers]
         
-        cy_dec_hidden = fake_features
+        cy_dec_hidden = torch.cat((fake_mu.unsqueeze(0), fake_logvar.unsqueeze(0)))
         
         seq = torch.LongTensor([])
         seq = seq.cuda() if cfg.CUDA else seq          
@@ -656,7 +834,7 @@ class GANTrainer(object):
                 if i == self.txt_dico.EOS_TOKEN:
                     break
                 if i != self.txt_dico.SOS_TOKEN:
-                    s += unicode(self.txt_dico.id2word[i].decode("utf-8")) + u" "
+                    s += self.txt_dico.id2word[i] + u" "
             cy_captions.append(s)
             
         save_name = "%s/cycle_encoded.txt" % (save_dir)
@@ -668,12 +846,12 @@ class GANTrainer(object):
         # real image captioning
         #######################################################
         
-        real_features = nn.parallel.data_parallel(image_encoder, (real_imgs[sort_idx]), self.gpus)
+        real_mu, real_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs[sort_idx]), self.gpus)
         
         cap_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
         cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
         
-        cap_dec_hidden = real_features
+        cap_dec_hidden = torch.cat((real_mu.unsqueeze(0), real_logvar.unsqueeze(0)))
         
         seq = torch.LongTensor([])
         seq = seq.cuda() if cfg.CUDA else seq          
@@ -702,10 +880,60 @@ class GANTrainer(object):
                 if i == self.txt_dico.EOS_TOKEN:
                     break
                 if i != self.txt_dico.SOS_TOKEN:
-                    s += unicode(self.txt_dico.id2word[i].decode("utf-8")) + u" "
+                    s += self.txt_dico.id2word[i] + u" "
             cap_captions.append(s)
             
         save_name = "%s/realim2cap_encoded.txt" % (save_dir)
         with open(save_name, "w") as f:
             for i in range(batch_size):
                 f.write("ORIG %d\t%s\nPRED %d\t%s\n\n" % (i, sorted_captions[i], i, cap_captions[i]))                 
+                
+                
+        lengths = torch.LongTensor(batch_size).fill_(20)
+        
+        ### ok
+        
+        pred_inds, pred_lens = seq, lengths
+        pred_inds = Variable(pred_inds.transpose(0,1))
+        pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
+
+        pred_out, pred_hidden = encoder(pred_inds, pred_lens.cpu().numpy(), None)
+
+        # reparameterize
+        std_p = pred_hidden[1].mul(0.5).exp_()
+        eps_p = Variable(std_p.data.new(std_p.size()).normal_())
+        real_p = eps_p.mul(std_p).add_(pred_hidden[0])
+
+        noise.data.normal_(0, 1)
+        inputs = (real_p, noise)
+        _, fake_from_fake_img, mu, logvar = \
+            nn.parallel.data_parallel(netG, inputs, self.gpus)        
+
+        ################################################
+        # auto-encoding images
+        ################################################
+        
+        real_mu, real_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs[sort_idx]), self.gpus)
+        
+        std_z = real_logvar.mul(0.5).exp_()
+        eps_z = Variable(std_z.data.new(std_z.size()).normal_())
+        real_z = eps_z.mul(std_z).add_(real_mu)
+        
+        noise.data.normal_(0, 1)
+        inputs = (real_z, noise)
+        _, fake_from_real_img, mu, logvar = \
+            nn.parallel.data_parallel(netG, inputs, self.gpus) 
+
+        for i in range(batch_size):
+            save_name = '%s/auto_%03d.png' % (save_dir, i)
+            im = fake_from_real_img[i].data.cpu().numpy()
+            im = (im + 1.0) * 127.5
+            im = im.astype(np.uint8)
+            # print('im', im.shape)
+            im = np.transpose(im, (1, 2, 0))
+            # print('im', im.shape)
+            im = Image.fromarray(im)
+            im.save(save_name)        
+            
+        save_img_results(real_imgs[sort_idx].data, fake_from_real_img, 0, save_dir)
+        save_img_results(None, fake_from_fake_img, 0, save_dir)

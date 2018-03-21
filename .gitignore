@@ -1,6 +1,10 @@
 output
+output_save
 code/*.pyc
 code/miscc/*.pyc
+code/__pycache__
+code/miscc/__pycache__
+code/vae_results
 backup
 .DS_Store
 .idea/

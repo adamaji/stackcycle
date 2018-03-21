@@ -10,6 +10,7 @@ from torch.nn import init
 import torch
 import torch.nn as nn
 import torchvision.utils as vutils
+import torch.nn.functional as F
 
 import re, inspect
 from torch import optim
@@ -17,6 +18,10 @@ from torch import optim
 #############################
 def KL_loss(mu, logvar):
     # -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+    
+    #mu = F.sigmoid(mu)
+    #logvar = F.sigmoid(logvar)
+    
     KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
     KLD = torch.mean(KLD_element).mul_(-0.5)
     return KLD
@@ -24,9 +29,11 @@ def KL_loss(mu, logvar):
 def compute_discriminator_loss_cycle(netD, real_imgs, fake_imgs,
                                real_labels, fake_labels,
                                conditions, gpus):
-    criterion = nn.BCELoss()
+    #criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
+    
     batch_size = real_imgs.size(0)
-    cond = conditions.detach()
+    #cond = conditions.detach()
     fake = fake_imgs.detach()
     real_features = nn.parallel.data_parallel(netD, (real_imgs), gpus)
     fake_features = nn.parallel.data_parallel(netD, (fake), gpus)
@@ -110,7 +117,9 @@ def compute_discriminator_loss(netD, real_imgs, fake_imgs,
 
 
 def compute_generator_loss(netD, fake_imgs, real_labels, conditions, gpus):
-    criterion = nn.BCELoss()
+    #criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
+    
     #cond = conditions.detach()
     fake_features = nn.parallel.data_parallel(netD, (fake_imgs), gpus)
     # fake pairs

@@ -30,14 +30,12 @@ class EncodingDiscriminator(nn.Module):
                 layers.append(nn.Dropout(self.dis_dropout))
                 
         #layers.append(nn.LogSigmoid())
+        #layers.append(nn.Sigmoid())
         
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
-        #assert x.dim() == 3 and x.size(2) == self.emb_dim
         l = self.layers(x)
-        #return l.view(-1)
-        #return torch.exp(torch.sum(l, dim=0))
         return l
 
 class STAGE1_ImageEncoder(nn.Module):
@@ -53,42 +51,53 @@ class STAGE1_ImageEncoder(nn.Module):
         self.encode_img = nn.Sequential(
             nn.Conv2d(3, ndf, 4, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
+            
             # state size. (ndf) x 32 x 32
             nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 2),
             nn.LeakyReLU(0.2, inplace=True),
+            
             # state size (ndf*2) x 16 x 16
             nn.Conv2d(ndf*2, ndf * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 4),
             nn.LeakyReLU(0.2, inplace=True),
+            
             # state size (ndf*4) x 8 x 8
             nn.Conv2d(ndf*4, ndf * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 8),
+            
             # state size (ndf * 8) x 4 x 4)
             nn.LeakyReLU(0.2, inplace=True),
-            nn.MaxPool2d(2, stride=2),
-            #nn.Linear(1024, 300)
+            nn.MaxPool2d(2, stride=2)
         )
         
-        # self.encode_img = nn.Sequential(
-        #     nn.Linear(64 * 64 * 3, 1024),
-        #     nn.LeakyReLU(0.2, inplace=True)
-        # )
-        
-        #self.linear = nn.Linear(96 * self.batch_size, 300 * 2)
-        #self.linear = nn.Linear(1024, 300 * 2)
         self.l1 = nn.Linear(768 * 2 * 2, 300)
-        self.l2 = nn.Linear(768 * 2 * 2, 300)
-
-        # self.get_cond_logits = D_GET_LOGITS(ndf, nef)
-        # self.get_uncond_logits = D_GET_LOGITS(ndf, nef, bcondition=False)
-
+        #self.l2 = nn.Linear(768 * 2 * 2, 300)
+        
+        self.map_spaces = 9
+        self.l2 = nn.Linear(768 * 2 * 2, 300 * self.map_spaces)
+        
+        self.ca_net = CA_NET(300, 300)
+        
     def forward(self, image):
-        img_embedding = self.encode_img(image)#.view(-1, 64 * 64 * 3))
+        encoded = self.encode_img(image)#.view(-1, 64 * 64 * 3))
         #emb = self.linear(img_embedding.view(-1, 1024))
-        mu = self.l1(img_embedding.view(-1, 768 * 2 * 2))
-        logvar = self.l2(img_embedding.view(-1, 768 * 2 * 2))
-        return mu, logvar
+        #mu = self.l1(img_embedding.view(-1, 768 * 2 * 2))
+        #logvar = self.l2(img_embedding.view(-1, 768 * 2 * 2))
+        
+        #feats = F.avg_pool2d(features, kernel_size=2)
+        
+        features = self.l2(encoded.view(-1, 768 * 2 * 2))
+        features = features.view(self.map_spaces,-1,300).transpose(0,1)
+        
+        imcode = self.l1(encoded.view(-1, 768 * 2 * 2))
+        
+        c_code, mu, logvar = self.ca_net(imcode)
+        
+        assert features.size(1) == self.map_spaces
+        
+        # should return features (for decoding attn), and embedded code (whole thing)
+        return features, imcode, c_code, mu, logvar
 
 class EncoderRNN(nn.Module):
     def __init__(self, hidden_size, src_emb, n_layers=1, dropout=0.1):
@@ -102,6 +111,8 @@ class EncoderRNN(nn.Module):
         self.src_emb = src_emb
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=self.dropout, bidirectional=True)
         
+        self.ca_net = CA_NET(300, 300)
+        
     def forward(self, input_seqs, input_lengths, hidden=None):
         # Note: we run this all at once (over multiple batches of multiple sequences)
         #embedded = self.embedding(input_seqs)
@@ -111,7 +122,10 @@ class EncoderRNN(nn.Module):
         outputs, hidden = self.gru(packed, hidden)
         outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs) # unpack (back to padded)
         outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] # Sum bidirectional outputs
-        return outputs, hidden
+        
+        c_code, mu, logvar = self.ca_net(hidden[0])
+        
+        return outputs, hidden, c_code, mu, logvar
     
 class Attn(nn.Module):
     def __init__(self, method, hidden_size):
@@ -138,22 +152,6 @@ class Attn(nn.Module):
 
         # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
         return F.softmax(attn_energies, dim=1).unsqueeze(1)
-    
-    def score(self, hidden, encoder_output):
-        
-        if self.method == 'dot':
-            energy = hidden.dot(encoder_output)
-            return energy
-        
-        elif self.method == 'general':
-            energy = self.attn(encoder_output)
-            energy = hidden.dot(energy)
-            return energy
-        
-        elif self.method == 'concat':
-            energy = self.attn(torch.cat((hidden, encoder_output), 1))
-            energy = self.v.dot(energy)
-            return energy
 
 class LuongAttnDecoderRNN(nn.Module):
     def __init__(self, attn_model, hidden_size, output_size, src_emb, n_layers=1, dropout=0.1):
@@ -249,12 +247,12 @@ class ResBlock(nn.Module):
 class CA_NET(nn.Module):
     # some code is modified from vae examples
     # (https://github.com/pytorch/examples/blob/master/vae/main.py)
-    def __init__(self):
+    def __init__(self, input_dim, hidden_dim):
         super(CA_NET, self).__init__()
-        self.t_dim = cfg.TEXT.DIMENSION
-        self.c_dim = cfg.GAN.CONDITION_DIM
+        self.t_dim = input_dim
+        self.c_dim = hidden_dim
         self.fc = nn.Linear(self.t_dim, self.c_dim * 2, bias=True)
-        self.relu = nn.ReLU()
+        self.relu = nn.LeakyReLU()
 
     def encode(self, text_embedding):
         x = self.relu(self.fc(text_embedding))
@@ -262,7 +260,7 @@ class CA_NET(nn.Module):
         logvar = x[:, self.c_dim:]
         return mu, logvar
 
-    def reparametrize(self, mu, logvar):
+    def reparameterize(self, mu, logvar):
         std = logvar.mul(0.5).exp_()
         if cfg.CUDA:
             eps = torch.cuda.FloatTensor(std.size()).normal_()
@@ -273,7 +271,7 @@ class CA_NET(nn.Module):
 
     def forward(self, text_embedding):
         mu, logvar = self.encode(text_embedding)
-        c_code = self.reparametrize(mu, logvar)
+        c_code = self.reparameterize(mu, logvar)
         return c_code, mu, logvar
 
 
@@ -321,11 +319,11 @@ class STAGE1_G(nn.Module):
 
     def define_module(self):
         #ninput = self.z_dim + self.ef_dim
-        ninput = 300
+        ninput = 300 + self.z_dim
         
         ngf = self.gf_dim
         # TEXT.DIMENSION -> GAN.CONDITION_DIM
-        self.ca_net = CA_NET()
+        #self.ca_net = CA_NET()
 
         # -> ngf x 4 x 4
         self.fc = nn.Sequential(
@@ -350,10 +348,10 @@ class STAGE1_G(nn.Module):
         self.r1 = nn.ReLU(True)
         self.l2 = nn.Linear(1024, 64 * 64 * 3)
 
-    def forward(self, text_embedding, noise):
+    def forward(self, c_code, noise):
         #c_code, mu, logvar = self.ca_net(text_embedding)
-        #z_c_code = torch.cat((noise, c_code), 1)
-        z_c_code = text_embedding
+        z_c_code = torch.cat((noise, c_code), 1)
+        #z_c_code = text_embedding
         h_code = self.fc(z_c_code)
 
         h_code = h_code.view(-1, self.gf_dim, 4, 4)
@@ -403,119 +401,3 @@ class STAGE1_D(nn.Module):
         img_embedding = self.encode_img(image)
 
         return img_embedding
-
-
-# # ############# Networks for stageII GAN #############
-# class STAGE2_G(nn.Module):
-#     def __init__(self, STAGE1_G):
-#         super(STAGE2_G, self).__init__()
-#         self.gf_dim = cfg.GAN.GF_DIM
-#         self.ef_dim = cfg.GAN.CONDITION_DIM
-#         self.z_dim = cfg.Z_DIM
-#         self.STAGE1_G = STAGE1_G
-#         # fix parameters of stageI GAN
-#         for param in self.STAGE1_G.parameters():
-#             param.requires_grad = False
-#         self.define_module()
-
-#     def _make_layer(self, block, channel_num):
-#         layers = []
-#         for i in range(cfg.GAN.R_NUM):
-#             layers.append(block(channel_num))
-#         return nn.Sequential(*layers)
-
-#     def define_module(self):
-#         ngf = self.gf_dim
-#         # TEXT.DIMENSION -> GAN.CONDITION_DIM
-#         self.ca_net = CA_NET()
-#         # --> 4ngf x 16 x 16
-#         self.encoder = nn.Sequential(
-#             conv3x3(3, ngf),
-#             nn.ReLU(True),
-#             nn.Conv2d(ngf, ngf * 2, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ngf * 2),
-#             nn.ReLU(True),
-#             nn.Conv2d(ngf * 2, ngf * 4, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ngf * 4),
-#             nn.ReLU(True))
-#         self.hr_joint = nn.Sequential(
-#             conv3x3(self.ef_dim + ngf * 4, ngf * 4),
-#             nn.BatchNorm2d(ngf * 4),
-#             nn.ReLU(True))
-#         self.residual = self._make_layer(ResBlock, ngf * 4)
-#         # --> 2ngf x 32 x 32
-#         self.upsample1 = upBlock(ngf * 4, ngf * 2)
-#         # --> ngf x 64 x 64
-#         self.upsample2 = upBlock(ngf * 2, ngf)
-#         # --> ngf // 2 x 128 x 128
-#         self.upsample3 = upBlock(ngf, ngf // 2)
-#         # --> ngf // 4 x 256 x 256
-#         self.upsample4 = upBlock(ngf // 2, ngf // 4)
-#         # --> 3 x 256 x 256
-#         self.img = nn.Sequential(
-#             conv3x3(ngf // 4, 3),
-#             nn.Tanh())
-
-#     def forward(self, text_embedding, noise):
-#         _, stage1_img, _, _ = self.STAGE1_G(text_embedding, noise)
-#         stage1_img = stage1_img.detach()
-#         encoded_img = self.encoder(stage1_img)
-
-#         c_code, mu, logvar = self.ca_net(text_embedding)
-#         c_code = c_code.view(-1, self.ef_dim, 1, 1)
-#         c_code = c_code.repeat(1, 1, 16, 16)
-#         i_c_code = torch.cat([encoded_img, c_code], 1)
-#         h_code = self.hr_joint(i_c_code)
-#         h_code = self.residual(h_code)
-
-#         h_code = self.upsample1(h_code)
-#         h_code = self.upsample2(h_code)
-#         h_code = self.upsample3(h_code)
-#         h_code = self.upsample4(h_code)
-
-#         fake_img = self.img(h_code)
-#         return stage1_img, fake_img, mu, logvar
-
-
-# class STAGE2_D(nn.Module):
-#     def __init__(self):
-#         super(STAGE2_D, self).__init__()
-#         self.df_dim = cfg.GAN.DF_DIM
-#         self.ef_dim = cfg.GAN.CONDITION_DIM
-#         self.define_module()
-
-#     def define_module(self):
-#         ndf, nef = self.df_dim, self.ef_dim
-#         self.encode_img = nn.Sequential(
-#             nn.Conv2d(3, ndf, 4, 2, 1, bias=False),  # 128 * 128 * ndf
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ndf * 2),
-#             nn.LeakyReLU(0.2, inplace=True),  # 64 * 64 * ndf * 2
-#             nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ndf * 4),
-#             nn.LeakyReLU(0.2, inplace=True),  # 32 * 32 * ndf * 4
-#             nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ndf * 8),
-#             nn.LeakyReLU(0.2, inplace=True),  # 16 * 16 * ndf * 8
-#             nn.Conv2d(ndf * 8, ndf * 16, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ndf * 16),
-#             nn.LeakyReLU(0.2, inplace=True),  # 8 * 8 * ndf * 16
-#             nn.Conv2d(ndf * 16, ndf * 32, 4, 2, 1, bias=False),
-#             nn.BatchNorm2d(ndf * 32),
-#             nn.LeakyReLU(0.2, inplace=True),  # 4 * 4 * ndf * 32
-#             conv3x3(ndf * 32, ndf * 16),
-#             nn.BatchNorm2d(ndf * 16),
-#             nn.LeakyReLU(0.2, inplace=True),   # 4 * 4 * ndf * 16
-#             conv3x3(ndf * 16, ndf * 8),
-#             nn.BatchNorm2d(ndf * 8),
-#             nn.LeakyReLU(0.2, inplace=True)   # 4 * 4 * ndf * 8
-#         )
-
-#         self.get_cond_logits = D_GET_LOGITS(ndf, nef, bcondition=True)
-#         self.get_uncond_logits = D_GET_LOGITS(ndf, nef, bcondition=False)
-
-#     def forward(self, image):
-#         img_embedding = self.encode_img(image)
-
-#         return img_embedding

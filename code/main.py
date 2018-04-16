@@ -21,6 +21,8 @@ from miscc.config import cfg, cfg_from_file
 from miscc.utils import mkdir_p
 from trainer import GANTrainer
 
+from spv_trainer import GANTrainerSpv
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a GAN network')
@@ -30,6 +32,8 @@ def parse_args():
     parser.add_argument('--gpu',  dest='gpu_id', type=str, default='0')
     parser.add_argument('--data_dir', dest='data_dir', type=str, default='')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
+    parser.add_argument('--supervised', type=bool, default=False)
+    
     args = parser.parse_args()
     return args
 
@@ -51,11 +55,15 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(args.manualSeed)
     now = datetime.datetime.now(dateutil.tz.tzlocal())
     timestamp = now.strftime('%Y_%m_%d_%H_%M_%S')
+    
+    name = input("Enter a name for this run: ")
+    
     output_dir = '../output/%s_%s_%s' % \
-                 (cfg.DATASET_NAME, cfg.CONFIG_NAME, timestamp)
+                 (cfg.DATASET_NAME, cfg.CONFIG_NAME, name)
 
     num_gpu = len(cfg.GPU_ID.split(','))
     if cfg.TRAIN.FLAG:
+        
         image_transform = transforms.Compose([
             transforms.RandomCrop(cfg.IMSIZE),
             transforms.RandomHorizontalFlip(),
@@ -68,8 +76,20 @@ if __name__ == "__main__":
         dataloader = torch.utils.data.DataLoader(
             dataset, batch_size=cfg.TRAIN.BATCH_SIZE * num_gpu,
             drop_last=True, shuffle=True, num_workers=int(cfg.WORKERS))
+        
+        # dataset = datasets.MNIST('../data', train=False, transform=transforms.Compose([
+        #                transforms.ToTensor(),
+        #                transforms.Normalize((0.1307,), (0.3081,))
+        #            ]))
+        # dataloader = torch.utils.data.DataLoader(
+        #     dataset,
+        #     batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True, num_workers=int(cfg.WORKERS))
 
-        algo = GANTrainer(output_dir)
+        if args.supervised:
+            print("running supervised")
+            algo = GANTrainerSpv(output_dir)
+        else:
+            algo = GANTrainer(output_dir)
         algo.train(dataloader, dataset, cfg.STAGE)
     else:
         #datapath= '%s/test/val_captions.t7' % (cfg.DATA_DIR)

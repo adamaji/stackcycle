@@ -20,7 +20,7 @@ TRAIN:
       KL: 2.0
 
 GAN:
-    CONDITION_DIM: 128
+    CONDITION_DIM: 300
     DF_DIM: 96
     GF_DIM: 192
 

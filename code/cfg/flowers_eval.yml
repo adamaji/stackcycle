@@ -1,0 +1,31 @@
+CONFIG_NAME: 'stageII'
+
+DATASET_NAME: 'flowers'
+EMBEDDING_TYPE: 'cnn-rnn'
+GPU_ID: '0,1'
+Z_DIM: 100
+NET_G: '../output_save/flowers_img-enc-loop/Model/netG_epoch_120.pth'
+ENCODER: '../output_save/flowers_img-enc-loop/Model/encoder_epoch_120.pth'
+DECODER: '../output_save/flowers_img-enc-loop/Model/decoder_epoch_120.pth'
+IMAGE_ENCODER: '../output_save/flowers_img-enc-loop/Model/image_encoder_epoch_120.pth'
+#NET_G: '../output/birds_stageI_2018_03_10_11_39_54/Model/netG_epoch_120.pth'
+#ENCODER: '../output/birds_stageI_2018_03_10_11_39_54/Model/encoder_epoch_120.pth'
+#DECODER: '../output/birds_stageI_2018_03_10_11_39_54/Model/decoder_epoch_120.pth'
+#IMAGE_ENCODER: '../output/birds_stageI_2018_03_10_11_39_54/Model/image_encoder_epoch_120.pth'
+
+DATA_DIR: '../data/flowers'
+WORKERS: 4
+IMSIZE: 64
+STAGE: 1
+TRAIN:
+    FLAG: False
+    BATCH_SIZE: 128
+
+GAN:
+    CONDITION_DIM: 300
+    DF_DIM: 96
+    GF_DIM: 192
+    R_NUM: 2
+
+TEXT:
+    DIMENSION: 300

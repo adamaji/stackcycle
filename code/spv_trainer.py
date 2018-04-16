@@ -25,7 +25,7 @@ from miscc.utils import mkdir_p
 from miscc.utils import weights_init
 from miscc.utils import save_img_results, save_model
 from miscc.utils import KL_loss
-from miscc.utils import compute_discriminator_loss, compute_generator_loss_cycle
+from miscc.utils import compute_discriminator_loss, compute_generator_loss
 from miscc.utils import compute_discriminator_loss_cycle, compute_cond_disc
 
 from miscc.utils import load_external_embeddings, get_optimizer
@@ -46,7 +46,7 @@ def normalize(nparr):
     return nparr / mx
     
 
-class GANTrainer(object):
+class GANTrainerSpv(object):
     def __init__(self, output_dir):
         if cfg.TRAIN.FLAG:
             self.model_dir = os.path.join(output_dir, 'Model')
@@ -77,7 +77,7 @@ class GANTrainer(object):
         self.txt_dico = txt_dico
         self.txt_emb = txt_emb
         
-        self.vis = visdom.Visdom(server='http://bvisionserver9.cs.unc.edu', port=8088, env=output_dir)
+        self.vis = visdom.Visdom(server='http://bvisionserver9.cs.unc.edu', port=8088, env="birds_spv2")
         self.vis_win1 = self.vis.images(np.ones((64,3,64,64)))
         self.vis_win2 = self.vis.images(np.ones((64,3,64,64)))
         self.vis_win3 = self.vis.images(np.ones((64,3,64,64)))
@@ -363,7 +363,6 @@ class GANTrainer(object):
                 loss_auto = 0
                 auto_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
                 auto_dec_inp = auto_dec_inp.cuda() if cfg.CUDA else auto_dec_inp
-                #auto_dec_hidden = encoder_hidden[:decoder.n_layers]
                 auto_dec_hidden = real_txt_code.unsqueeze(0)
 
                 max_target_length = inds.size(0)
@@ -405,7 +404,7 @@ class GANTrainer(object):
                 ######################################################                    
                 
                 fake_img_out = nn.parallel.data_parallel(
-                    image_encoder, (fake_imgs), self.gpus
+                    image_encoder, (real_imgs[sort_idx]), self.gpus
                 )
                 
                 fake_img_feats, fake_img_emb, fake_img_code, fake_img_mu, fake_img_logvar = fake_img_out
@@ -430,44 +429,7 @@ class GANTrainer(object):
 
                 loss_cd = loss_cd / lengths.float().sum()
                 
-                ###############################################################
-                # (2d) Generate image from predicted cap, calc img cycle loss
-                ###############################################################
-                
-                loss_cycle_img = 0
-                if (len(pred_cap)):
-                    pred_inds, pred_lens = pred_cap
-                    pred_inds = Variable(pred_inds.transpose(0,1))
-                    pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
-
-                    pred_output = encoder(pred_inds[:, sort_idx], pred_lens.cpu().numpy(), None)
-                    pred_txt_out, pred_txt_hidden, pred_txt_code, pred_txt_mu, pred_txt_logvar = pred_output
-                    
-                    noise.data.normal_(0, 1)
-                    inputs = (pred_txt_code, noise)
-                    _, fake_from_fake_img, mu, logvar = \
-                        nn.parallel.data_parallel(netG, inputs, self.gpus)
-                    
-                    clf_fake = clf_model.features(fake_from_fake_img)
-                    clf_real = clf_model.features(real_imgs[sort_idx])
-                    
-                    pred_img_out = nn.parallel.data_parallel(
-                        image_encoder, (fake_from_fake_img), self.gpus
-                    )                    
-                    
-                    pred_img_feats, pred_img_emb, pred_img_code, pred_img_mu, pred_img_logvar = pred_img_out
-                    
-                    semantic_target = Variable(torch.ones(batch_size))
-                    if cfg.CUDA:
-                        semantic_target = semantic_target.cuda()
-                        
-                    #pdb.set_trace()
-                        
-                    loss_cycle_img = semantic_criterion(
-                        #clf_fake.view(batch_size, -1), clf_real.view(batch_size, -1), semantic_target
-                        #pred_img_emb, real_img_emb, semantic_target
-                        pred_img_feats.contiguous().view(batch_size, -1), real_img_feats.contiguous().view(batch_size, -1), semantic_target
-                    )
+                loss_dc = criterionCycle(fake_imgs, real_imgs[sort_idx])
                 
                 ############################
                 # (3) Update D network
@@ -475,24 +437,12 @@ class GANTrainer(object):
                 netD.zero_grad()
                 enc_disc.zero_grad()
                 
-                # errD, errD_real, errD_wrong, errD_fake = \
-                #     compute_discriminator_loss(netD, real_imgs, fake_imgs,
-                #                                real_labels, fake_labels,
-                #                                mu, self.gpus)
-                
                 errD = 0
-                
-                errD_fake_imgs = compute_cond_disc(netD, fake_imgs, 
-                                                   fake_labels, encoder_hidden[0], self.gpus)
-                if (len(pred_cap)):
-                    errD_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
-                                                                 fake_labels, pred_txt_hidden[0], self.gpus)
-                    errD += errD_fake_from_fake_imgs                
-                
-                errD_im, errD_real, errD_fake = \
-                    compute_discriminator_loss_cycle(netD, real_imgs, fake_imgs,
+
+                errD_im, errD_real, errD_wrong, errD_fake = \
+                    compute_discriminator_loss(netD, real_imgs, fake_imgs,
                                                      real_labels, fake_labels,
-                                                     mu, self.gpus)
+                                                     real_txt_mu, self.gpus)
                     
                 # updating discriminator for encoding
                 txt_enc_labels = Variable(torch.FloatTensor(batch_size).fill_(0)) 
@@ -500,11 +450,6 @@ class GANTrainer(object):
                 if cfg.CUDA:
                     txt_enc_labels = txt_enc_labels.cuda()
                     img_enc_labels = img_enc_labels.cuda()
-                
-                #_, disc_hidden = encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
-                
-                #di_mu, di_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)
-                #disc_img = torch.cat((di_mu.unsqueeze(0), di_logvar.unsqueeze(0)))
                 
                 disc_real_txt_emb = encoder_hidden[0].detach()
                 disc_real_img_emb = real_img_emb.detach()
@@ -515,7 +460,7 @@ class GANTrainer(object):
                 enc_disc_loss_txt =  F.binary_cross_entropy_with_logits( pred_txt.squeeze(), txt_enc_labels)
                 enc_disc_loss_img = F.binary_cross_entropy_with_logits( pred_img.squeeze(), img_enc_labels)
                 
-                errD = errD + errD_im + errD_fake_imgs + enc_disc_loss_txt + enc_disc_loss_img
+                errD = errD + errD_im + enc_disc_loss_txt + enc_disc_loss_img
                 
                 # check NaN
                 if (errD != errD).data.any():
@@ -524,9 +469,7 @@ class GANTrainer(object):
                     exit()
                     
                 errD.backward()
-                
-                #pdb.set_trace() # why is the discriminator loss b/w z encs the same?
-                
+                        
                 optimizerD.step()
                 enc_disc_optimizer.step()
                 
@@ -538,32 +481,14 @@ class GANTrainer(object):
                 netG.zero_grad()
                 image_encoder.zero_grad()
                 
-                errG = compute_generator_loss_cycle(netD, fake_imgs,
-                                              real_labels, mu, self.gpus)
-                
-                # check unsupervised
-                errG_fake_imgs = compute_cond_disc(netD, fake_imgs, 
-                                                   real_labels, encoder_hidden[0], self.gpus)
-                if (len(pred_cap)):
-                    errG_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
-                                                                 real_labels, pred_txt_hidden[0], self.gpus)
-                    errG += errG_fake_from_fake_imgs
-                    
-                errG += errG_fake_imgs
-                
-                # fake pairs
-                # inputs = (fake_features, cond)
-                # fake_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-                # errD_fake = criterion(fake_logits, real_labels)                
-                
-                
-                #real_features = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)
+                errG = compute_generator_loss(netD, fake_imgs,
+                                              real_labels, real_txt_mu, self.gpus)
                 
                 img_kl_loss = KL_loss(real_img_mu, real_img_logvar)
                 txt_kl_loss = KL_loss(real_txt_mu, real_txt_logvar)
-                f_img_kl_loss = KL_loss(fake_img_mu, fake_img_logvar)
+                #f_img_kl_loss = KL_loss(fake_img_mu, fake_img_logvar)
 
-                kl_loss = img_kl_loss + txt_kl_loss + f_img_kl_loss
+                kl_loss = img_kl_loss + txt_kl_loss #+ f_img_kl_loss
                 
                 #_, disc_hidden_g = encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
                 #dg_mu, dg_logvar = nn.parallel.data_parallel(image_encoder, (real_imgs), self.gpus)                
@@ -575,7 +500,7 @@ class GANTrainer(object):
                 enc_fake_loss_txt = F.binary_cross_entropy_with_logits(pred_img_g.squeeze(), txt_enc_labels)
                 enc_fake_loss_img = F.binary_cross_entropy_with_logits(pred_txt_g.squeeze(), img_enc_labels)                
                                 
-                errG_total = 0.5 * errG + kl_loss * cfg.TRAIN.COEFF.KL + 10 * loss_cd + 10 * loss_img + loss_auto + enc_fake_loss_txt + enc_fake_loss_img + loss_cycle_img
+                errG_total = errG + kl_loss * cfg.TRAIN.COEFF.KL + loss_cd + loss_dc + loss_img + loss_auto + enc_fake_loss_txt + enc_fake_loss_img
                 
                 # check NaN
                 if (errG_total != errG_total).data.any():
@@ -617,56 +542,6 @@ class GANTrainer(object):
                     self.vis.text("\n*".join(captions), win=self.vis_txt1)
                     if (len(pred_cap)):
                         self.vis.images(normalize(fake_from_fake_img.data.cpu().numpy()), win=self.vis_win3)
-                
-                    #save_img_results(real_imgs[sort_idx].data, fake_from_real_img, epoch, self.image_dir)
-                    #if (len(pred_cap)):
-                    #    save_img_results(None, fake_from_fake_img, epoch, self.image_dir)
-                    #if lr_fake is not None:
-                    #    save_img_results(None, lr_fake, epoch, self.image_dir)
-                                    
-                        
-            # save pred caps for next iteration
-            for i, data in enumerate(data_loader, 0):
-                keys, real_img_cpu, _, _, _ = data
-                real_imgs = Variable(real_img_cpu)
-                if cfg.CUDA:
-                    real_imgs = real_imgs.cuda()                
-                
-                cap_img_out = nn.parallel.data_parallel(
-                    image_encoder, (real_imgs[sort_idx]), self.gpus
-                )
-                
-                cap_img_feats, cap_img_emb, cap_img_code, cap_img_mu, cap_img_logvar = cap_img_out
-                cap_img_feats = cap_img_feats.transpose(0,1)
-                                                
-                cap_features = cap_img_code.unsqueeze(0)
-                
-                cap_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
-                cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
-
-                cap_dec_hidden = cap_features.detach()
-
-                seq = torch.LongTensor([])
-                seq = seq.cuda() if cfg.CUDA else seq
-
-                max_target_length = 20
-                
-                lengths = torch.LongTensor(batch_size).fill_(20)
-
-                for t in range(max_target_length):
-
-                    cap_dec_out, cap_dec_hidden, cap_dec_attn = decoder(
-                        cap_dec_inp, cap_dec_hidden, cap_img_feats
-                    )
-
-                    topv, topi = cap_dec_out.topk(1, dim=1)
-
-                    cap_dec_inp = topi #.squeeze(dim=2)
-                    cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
-
-                    seq = torch.cat((seq, cap_dec_inp.data), dim=1)
-
-                dataset.save_captions(keys, seq.cpu(), lengths.cpu())
             
             
             end_t = time.time()
@@ -687,9 +562,6 @@ class GANTrainer(object):
                 enc_disc_loss_txt.data[0], 
                 enc_disc_loss_img.data[0]
             )
-
-            if hasattr(loss_cycle_img, 'data'):
-                gen_str += " CyI: %.3f" % (loss_cycle_img.data[0])
                 
             print("%s %s, %s" % (prefix, gen_str, dis_str))
             
@@ -699,327 +571,3 @@ class GANTrainer(object):
         save_model(netG, netD, encoder, decoder, image_encoder, self.max_epoch, self.model_dir)
         #
         self.summary_writer.close()
-
-    ############################################################################################################
-    #
-    # INFERENCE
-    #
-    ############################################################################################################
-    
-    
-    def sample(self, data_loader, stage=1):
-        if stage == 1:
-            netG, _, encoder, decoder, image_encoder, _, _ = self.load_network_stageI()
-        else:
-            netG, _ = self.load_network_stageII()
-        #netG.eval()
-
-        # for i, data in enumerate(data_loader, 0):
-        #     real_img_cpu, txt_embedding, captions = data
-        
-        with open("test128_%s.pkl" % (cfg.DATASET_NAME), "rb") as f:
-            data = pickle.load(f)
-            #pickle.dump(data, f)
-
-        #_, real_img_cpu, txt_embedding, captions, _ = data
-        real_img_cpu, txt_embedding, captions = data
-        real_imgs = Variable(real_img_cpu)
-        #txt_embedding = Variable(txt_embedding)
-                
-        # real_imgs = real_imgs2[:1].repeat(4,1,1,1)   
-        # captions = [captions[0],captions[0],captions[0],captions[0]
-        #            ]
-        # self.batch_size = 4
-
-        inds, lengths = self.process_captions(captions)
-        lens_sort, sort_idx = lengths.sort(0, descending=True)
-        encoder_output = encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
-        encoder_out, encoder_hidden, real_txt_code, real_txt_mu, real_txt_logvar = encoder_output
-        txt_embedding = encoder_hidden[0]
-        
-        sorted_captions = [captions[i] for i in sort_idx.cpu().tolist()]
-        
-        if cfg.CUDA:
-            real_imgs = real_imgs.cuda()
-            txt_embedding = txt_embedding.cuda()            
-            # if i>0:
-            #     break
-                                
-        # Load text embeddings generated from the encoder
-        #t_file = torchfile.load(datapath)
-        #captions_list = t_file.raw_txt
-        #embeddings = np.concatenate(t_file.fea_txt, axis=0)
-        #num_embeddings = len(captions_list)
-        #print('Successfully load sentences from: ', datapath)
-        #print('Total number of sentences:', num_embeddings)
-        #print('num_embeddings:', num_embeddings, embeddings.shape)
-        
-        # path to save generated samples
-        #save_dir = cfg.NET_G[:cfg.NET_G.find('.pth')]
-        save_dir = "/playpen1/aji/stackcycle_results/spv2/%s/" % (cfg.DATASET_NAME)
-        mkdir_p(save_dir)
-
-        #batch_size = np.minimum(num_embeddings, self.batch_size)
-        batch_size = self.batch_size
-        num_embeddings = batch_size
-        
-        nz = cfg.Z_DIM
-        noise = Variable(torch.FloatTensor(batch_size, nz))
-        if cfg.CUDA:
-            noise = noise.cuda()
-        # count = 0
-        # while count < num_embeddings:
-        #     if count > 3000:
-        #         break
-        #     iend = count + batch_size
-        #     if iend > num_embeddings:
-        #         iend = num_embeddings
-        #         count = num_embeddings - batch_size
-        #     embeddings_batch = embeddings[count:iend]
-        #     # captions_batch = captions_list[count:iend]
-        #     txt_embedding = Variable(torch.FloatTensor(embeddings_batch))
-        #     if cfg.CUDA:
-        #         txt_embedding = txt_embedding.cuda()
-        
-        #######################################################
-        # auto encoding
-        #######################################################
-        
-        auto_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
-        auto_dec_inp = auto_dec_inp.cuda() if cfg.CUDA else auto_dec_inp
-        auto_dec_hidden = encoder_hidden[:decoder.n_layers]
-        
-        seq = torch.LongTensor([])
-        seq = seq.cuda() if cfg.CUDA else seq          
-
-        max_target_length = 20
-        
-        for t in range(max_target_length):
-
-            auto_dec_out, auto_dec_hidden, auto_dec_attn = decoder(
-                auto_dec_inp, auto_dec_hidden, encoder_out
-            )
-            
-            topv, topi = auto_dec_out.topk(1, dim=1)
-                        
-            auto_dec_inp = topi #.squeeze(dim=2)
-            auto_dec_inp = auto_dec_inp.cuda() if cfg.CUDA else auto_dec_inp
-
-            seq = torch.cat((seq, auto_dec_inp.data), dim=1)               
-
-            #auto_dec_inp = inds[:,sort_idx][t]
-            
-        auto_captions = []
-        for d_i, d in enumerate(seq):
-            s = u""
-            for i in d:
-                if i == self.txt_dico.EOS_TOKEN:
-                    break
-                if i != self.txt_dico.SOS_TOKEN:
-                    s += self.txt_dico.id2word[i] + u" "
-            auto_captions.append(s)
-            
-        save_name = "%s/auto_encoded.txt" % (save_dir)
-        with open(save_name, "w") as f:
-            for i in range(batch_size):
-                f.write("ORIG %d\t%s\nAUTO %d\t%s\n\n" % (i, sorted_captions[i], i, auto_captions[i]))
-            
-
-        #######################################################
-        # (2) Generate fake images
-        ######################################################     
-        
-        noise.data.normal_(0, 1)
-        inputs = (real_txt_code, noise)
-        _, fake_imgs, mu, logvar = \
-            nn.parallel.data_parallel(netG, inputs, self.gpus)
-                        
-        for i in range(batch_size):
-            save_name = '%s/fake_%03d.png' % (save_dir, i)
-            im = fake_imgs[i].data.cpu().numpy()
-            im = (im + 1.0) * 127.5
-            im = im.astype(np.uint8)
-            # print('im', im.shape)
-            im = np.transpose(im, (1, 2, 0))
-            # print('im', im.shape)
-            im = Image.fromarray(im)
-            im.save(save_name)
-            # count += batch_size
-            
-        for i in range(batch_size):
-            save_name = '%s/real_%03d.png' % (save_dir, i)
-            im = real_imgs[sort_idx][i].data.cpu().numpy()
-            im = (im + 1.0) * 127.5
-            im = im.astype(np.uint8)
-            # print('im', im.shape)
-            im = np.transpose(im, (1, 2, 0))
-            # print('im', im.shape)
-            im = Image.fromarray(im)
-            im.save(save_name)
-            # count += batch_size            
-            
-        # write original captions
-            
-        save_name = "%s/captions.txt" % (save_dir)
-        with open(save_name, "w") as f:
-            for i in range(batch_size):
-                f.write("%d\t%s\n" % (i, sorted_captions[i]))
-        print("Saved to %s" % save_dir)
-        
-        #######################################################
-        # cycle
-        #######################################################
-                
-        fake_img_out = nn.parallel.data_parallel(
-            image_encoder, (fake_imgs), self.gpus
-        )
-
-        fake_img_feats, fake_img_emb, fake_img_code, fake_img_mu, fake_img_logvar = fake_img_out        
-        
-        cy_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
-        cy_dec_inp = cy_dec_inp.cuda() if cfg.CUDA else cy_dec_inp
-        #cy_dec_hidden = encoder_hidden[:decoder.n_layers]
-        
-        cy_dec_hidden = fake_img_code.unsqueeze(0)
-        
-        seq = torch.LongTensor([])
-        seq = seq.cuda() if cfg.CUDA else seq          
-
-        max_target_length = 20
-
-        for t in range(max_target_length):
-
-            cy_dec_out, cy_dec_hidden, cy_dec_attn = decoder(
-                cy_dec_inp, cy_dec_hidden, encoder_out
-            )
-            
-            topv, topi = cy_dec_out.topk(1, dim=1)
-                        
-            cy_dec_inp = topi #.squeeze(dim=2)
-            cy_dec_inp = cy_dec_inp.cuda() if cfg.CUDA else cy_dec_inp
-
-            seq = torch.cat((seq, cy_dec_inp.data), dim=1)               
-
-            #auto_dec_inp = inds[:,sort_idx][t]
-            
-        cy_captions = []
-        for d_i, d in enumerate(seq):
-            s = u""
-            for i in d:
-                if i == self.txt_dico.EOS_TOKEN:
-                    break
-                if i != self.txt_dico.SOS_TOKEN:
-                    s += self.txt_dico.id2word[i] + u" "
-            cy_captions.append(s)
-            
-        save_name = "%s/cycle_encoded.txt" % (save_dir)
-        with open(save_name, "w") as f:
-            for i in range(batch_size):
-                f.write("ORIG %d\t%s\nCYCL %d\t%s\n\n" % (i, sorted_captions[i], i, cy_captions[i]))        
-
-        #######################################################
-        # real image captioning
-        #######################################################
-        
-        real_img_out = nn.parallel.data_parallel(
-            image_encoder, (real_imgs[sort_idx]), self.gpus
-        )
-
-        real_img_feats, real_img_emb, real_img_code, real_mu, real_logvar = real_img_out        
-                
-        cap_dec_inp = Variable(torch.LongTensor([self.txt_dico.SOS_TOKEN] * self.batch_size))
-        cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
-        
-        cap_dec_hidden = real_img_code.unsqueeze(0)
-        
-        seq = torch.LongTensor([])
-        seq = seq.cuda() if cfg.CUDA else seq          
-
-        max_target_length = 20
-
-        for t in range(max_target_length):
-
-            cap_dec_out, cap_dec_hidden, cap_dec_attn = decoder(
-                cap_dec_inp, cap_dec_hidden, encoder_out
-            )
-            
-            topv, topi = cap_dec_out.topk(1, dim=1)
-                        
-            cap_dec_inp = topi #.squeeze(dim=2)
-            cap_dec_inp = cap_dec_inp.cuda() if cfg.CUDA else cap_dec_inp
-
-            seq = torch.cat((seq, cap_dec_inp.data), dim=1)               
-
-            #auto_dec_inp = inds[:,sort_idx][t]
-            
-        cap_captions = []
-        for d_i, d in enumerate(seq):
-            s = u""
-            for i in d:
-                if i == self.txt_dico.EOS_TOKEN:
-                    break
-                if i != self.txt_dico.SOS_TOKEN:
-                    s += self.txt_dico.id2word[i] + u" "
-            cap_captions.append(s)
-            
-        save_name = "%s/realim2cap_encoded.txt" % (save_dir)
-        with open(save_name, "w") as f:
-            for i in range(batch_size):
-                f.write("ORIG %d\t%s\nPRED %d\t%s\n\n" % (i, sorted_captions[i], i, cap_captions[i]))                 
-                
-                
-        lengths = torch.LongTensor(batch_size).fill_(20)
-        
-        ### ok
-        
-        pred_inds, pred_lens = seq, lengths
-        pred_inds = Variable(pred_inds.transpose(0,1))
-        pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
-        
-        pred_output = encoder(pred_inds[:, sort_idx], pred_lens.cpu().numpy(), None)
-        _, _, pred_txt_code, _, _ = pred_output
-
-        noise.data.normal_(0, 1)
-        inputs = (pred_txt_code, noise)
-        _, fake_from_fake_img, mu, logvar = \
-            nn.parallel.data_parallel(netG, inputs, self.gpus)        
-
-        ################################################
-        # auto-encoding images
-        ################################################
-                
-        real_img_out = nn.parallel.data_parallel(
-            image_encoder, (real_imgs[sort_idx]), self.gpus
-        )
-
-        real_img_feats, real_img_emb, real_img_code, real_mu, real_logvar = real_img_out           
-        
-        noise.data.normal_(0, 1)
-        inputs = (real_img_code, noise)
-        _, fake_from_real_img, mu, logvar = \
-            nn.parallel.data_parallel(netG, inputs, self.gpus) 
-
-        for i in range(batch_size):
-            save_name = '%s/auto_%03d.png' % (save_dir, i)
-            im = fake_from_real_img[i].data.cpu().numpy()
-            im = (im + 1.0) * 127.5
-            im = im.astype(np.uint8)
-            # print('im', im.shape)
-            im = np.transpose(im, (1, 2, 0))
-            # print('im', im.shape)
-            im = Image.fromarray(im)
-            im.save(save_name) 
-            
-        for i in range(batch_size):
-            save_name = '%s/cycl_%03d.png' % (save_dir, i)
-            im = fake_from_fake_img[i].data.cpu().numpy()
-            im = (im + 1.0) * 127.5
-            im = im.astype(np.uint8)
-            # print('im', im.shape)
-            im = np.transpose(im, (1, 2, 0))
-            # print('im', im.shape)
-            im = Image.fromarray(im)
-            im.save(save_name)             
-            
-        save_img_results(real_imgs[sort_idx].data, fake_imgs, 0, save_dir)
-        save_img_results(None, fake_from_fake_img, 0, save_dir)

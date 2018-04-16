@@ -9,6 +9,7 @@ import torch
 import torch.utils.data as data
 from torch import nn
 from torch.autograd import Variable
+import torchfile
 
 from PIL import Image
 import PIL
@@ -90,6 +91,7 @@ class TextDataset(data.Dataset):
         caption_dict = {}
         for key in self.filenames:
             caption_name = '%s/text/%s.txt' % (self.data_dir, key)
+            #caption_name = '%s/text/%s.t7' % (self.data_dir, key)
             captions = self.load_captions(caption_name)
             caption_dict[key] = captions
         return caption_dict
@@ -139,7 +141,7 @@ class TextDataset(data.Dataset):
 
     def __getitem__(self, index):
         key = self.filenames[index]
-        # cls_id = self.class_id[index]
+        cls_id = self.class_id[index]
         #
         if self.bbox is not None:
             bbox = self.bbox[key]
@@ -167,7 +169,7 @@ class TextDataset(data.Dataset):
         #if self.target_transform is not None:
         #    embedding = self.target_transform(embedding)
         #return img, embedding, caption
-        return key, img, [], caption, pred_cap
+        return (key, cls_id), img, [], caption, pred_cap
 
     def __len__(self):
         return len(self.filenames)

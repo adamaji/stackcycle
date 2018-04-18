@@ -11,11 +11,14 @@ import torch
 import torch.nn as nn
 import torchvision.utils as vutils
 import torch.nn.functional as F
+from torch.autograd import Variable
 
 import re, inspect
 from torch import optim
 
-#############################
+#
+# kl divergence
+#
 def KL_loss(mu, logvar):
     # -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     
@@ -23,32 +26,59 @@ def KL_loss(mu, logvar):
     KLD = torch.mean(KLD_element).mul_(-0.5)
     return KLD
 
-def compute_discriminator_loss_cycle(netD, real_imgs, fake_imgs,
-                               real_labels, fake_labels,
-                               conditions, gpus):
-    #criterion = nn.BCELoss()
+#
+# compute generated image loss
+#
+def compute_image_gen_loss(image_generator, imgs, latent_code, noise, gpus):
+    criterion = nn.SmoothL1Loss()
+
+    inputs = (latent_code, noise)
+    generated_imgs = \
+        nn.parallel.data_parallel(image_generator, inputs, gpus)
+
+    loss = criterion(generated_imgs, imgs)   
+    
+    return loss
+
+#
+# compute generated text loss
+#
+def compute_text_gen_loss(text_generator, inds, latent_code, attn_seq, txt_dico):
+    loss_auto = 0
+    auto_dec_inp = Variable(torch.LongTensor([txt_dico.SOS_TOKEN] * cfg.TRAIN.BATCH_SIZE))
+    auto_dec_inp = auto_dec_inp.cuda() if cfg.CUDA else auto_dec_inp
+
+    auto_dec_hidden = latent_code
+
+    max_target_length = inds.size(0)
+
+    for t in range(max_target_length):
+
+        auto_dec_out, auto_dec_hidden, auto_dec_attn = text_generator(
+            auto_dec_inp, auto_dec_hidden, attn_seq
+        )
+
+        loss_auto = loss_auto + F.cross_entropy(auto_dec_out, 
+                                                inds[t], ignore_index=txt_dico.PAD_TOKEN)
+        auto_dec_inp = inds[t] 
+    
+    return loss_auto
+
+#
+# unconditional discriminator loss on generated images
+#
+def compute_uncond_discriminator_loss(netD, real_imgs, fake_imgs,
+                                      real_labels, fake_labels,
+                                      gpus):
+
     criterion = nn.BCEWithLogitsLoss()
     
     batch_size = real_imgs.size(0)
-    #cond = conditions.detach()
+    
     fake = fake_imgs.detach()
     real_features = nn.parallel.data_parallel(netD, (real_imgs), gpus)
     fake_features = nn.parallel.data_parallel(netD, (fake), gpus)
-    # # real pairs
-    # inputs = (real_features, cond)
-    # real_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    # errD_real = criterion(real_logits, real_labels)
-    # # wrong pairs
-    # inputs = (real_features[:(batch_size-1)], cond[1:])
-    # wrong_logits = \
-    #     nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    # errD_wrong = criterion(wrong_logits, fake_labels[1:])
-    # # fake pairs
-    # inputs = (fake_features, cond)
-    # fake_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    # errD_fake = criterion(fake_logits, fake_labels)
 
-    # if netD.get_uncond_logits is not None:
     real_logits = \
         nn.parallel.data_parallel(netD.get_uncond_logits,
                                   (real_features), gpus)
@@ -57,64 +87,17 @@ def compute_discriminator_loss_cycle(netD, real_imgs, fake_imgs,
                                   (fake_features), gpus)
     uncond_errD_real = criterion(real_logits, real_labels)
     uncond_errD_fake = criterion(fake_logits, fake_labels)
-    #
-    # errD = ((errD_real + uncond_errD_real) / 2. +
-    #         (errD_fake + errD_wrong + uncond_errD_fake) / 3.)
-    # errD_real = (errD_real + uncond_errD_real) / 2.
-    # errD_fake = (errD_fake + uncond_errD_fake) / 2.
     
     errD_real = uncond_errD_real
     errD_fake = uncond_errD_fake
     errD = (errD_fake + errD_real) / 2.
-    
-    # else:
-    #     errD = errD_real + (errD_fake + errD_wrong) * 0.5
+
     return errD, errD_real.data[0], errD_fake.data[0]
 
-def compute_discriminator_loss(netD, real_imgs, fake_imgs,
-                               real_labels, fake_labels,
-                               conditions, gpus):
-    #criterion = nn.BCELoss()
-    criterion = nn.BCEWithLogitsLoss()
-    
-    batch_size = real_imgs.size(0)
-    cond = conditions.detach()
-    fake = fake_imgs.detach()
-    real_features = nn.parallel.data_parallel(netD, (real_imgs), gpus)
-    fake_features = nn.parallel.data_parallel(netD, (fake), gpus)
-    # real pairs
-    inputs = (real_features, cond)
-    real_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    errD_real = criterion(real_logits, real_labels)
-    # wrong pairs
-    inputs = (real_features[:(batch_size-1)], cond[1:])
-    wrong_logits = \
-        nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    errD_wrong = criterion(wrong_logits, fake_labels[1:])
-    # fake pairs
-    inputs = (fake_features, cond)
-    fake_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    errD_fake = criterion(fake_logits, fake_labels)
-
-    if netD.get_uncond_logits is not None:
-        real_logits = \
-            nn.parallel.data_parallel(netD.get_uncond_logits,
-                                      (real_features), gpus)
-        fake_logits = \
-            nn.parallel.data_parallel(netD.get_uncond_logits,
-                                      (fake_features), gpus)
-        uncond_errD_real = criterion(real_logits, real_labels)
-        uncond_errD_fake = criterion(fake_logits, fake_labels)
-        #
-        errD = ((errD_real + uncond_errD_real) / 2. +
-                (errD_fake + errD_wrong + uncond_errD_fake) / 3.)
-        errD_real = (errD_real + uncond_errD_real) / 2.
-        errD_fake = (errD_fake + uncond_errD_fake) / 2.
-    else:
-        errD = errD_real + (errD_fake + errD_wrong) * 0.5
-    return errD, errD_real.data[0], errD_wrong.data[0], errD_fake.data[0]
-
-def compute_cond_disc(netD, imgs, labels, conditions, gpus):
+#
+# conditional discriminator loss on generated images
+# 
+def compute_cond_discriminator_loss(netD, imgs, labels, conditions, gpus):
     criterion = nn.BCEWithLogitsLoss()
     
     imgd = imgs.detach()
@@ -125,19 +108,50 @@ def compute_cond_disc(netD, imgs, labels, conditions, gpus):
     logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
     err = criterion(logits, labels)
     
+    #print(torch.sum(F.sigmoid(logits)).data[0], torch.sum(labels).data[0], err.data[0])
+    
     return err
 
-def compute_generator_loss_cycle(netD, fake_imgs, real_labels, conditions, gpus):
-    #criterion = nn.BCELoss()
+#
+# discriminator loss on latent features
+#
+def compute_latent_discriminator_loss(netD, img_feats, txt_feats, 
+                                      img_labels, txt_labels, gpus):    
     criterion = nn.BCEWithLogitsLoss()
     
-    #cond = conditions.detach()
+    disc_real_txt_emb = txt_feats.detach()
+    disc_real_img_emb = img_feats.detach()
+
+    pred_txt = netD(disc_real_txt_emb)
+    pred_img = netD(disc_real_img_emb)
+
+    txt_loss =  criterion( pred_txt.squeeze(), txt_labels )
+    img_loss = criterion( pred_img.squeeze(), img_labels )    
+    
+    return txt_loss + img_loss
+
+#
+# generator loss on latent features
+#
+def compute_latent_generator_loss(netD, img_feats, txt_feats,
+                                  img_labels, txt_labels, gpus):
+    criterion = nn.BCEWithLogitsLoss()
+    
+    disc_real_txt_emb = txt_feats.detach()
+    disc_real_img_emb = img_feats.detach()
+
+    pred_txt = netD(disc_real_txt_emb)
+    pred_img = netD(disc_real_img_emb)
+
+    txt_loss =  criterion( pred_txt.squeeze(), img_labels )
+    img_loss = criterion( pred_img.squeeze(), txt_labels )    
+    
+    return txt_loss + img_loss
+
+def compute_uncond_generator_loss(netD, fake_imgs, real_labels, gpus):
+    criterion = nn.BCEWithLogitsLoss()
+    
     fake_features = nn.parallel.data_parallel(netD, (fake_imgs), gpus)
-    # fake pairs
-    # inputs = (fake_features, cond)
-    # fake_logits = nn.parallel.data_parallel(netD.get_cond_logits, inputs, gpus)
-    # errD_fake = criterion(fake_logits, real_labels)
-    #if netD.get_uncond_logits is not None:
     
     errD_fake = 0
     fake_logits = \
@@ -148,11 +162,11 @@ def compute_generator_loss_cycle(netD, fake_imgs, real_labels, conditions, gpus)
     
     return errD_fake
 
-def compute_generator_loss(netD, fake_imgs, real_labels, conditions, gpus):
-    #criterion = nn.BCELoss()
+def compute_cond_generator_loss(netD, fake_imgs, real_labels, conditions, gpus):
     criterion = nn.BCEWithLogitsLoss()
     
-    cond = conditions.detach()
+    #cond = conditions.detach()
+    cond = conditions
     fake_features = nn.parallel.data_parallel(netD, (fake_imgs), gpus)
     
     #fake pairs
@@ -204,22 +218,29 @@ def save_img_results(data_img, fake, epoch, image_dir):
             (image_dir, epoch), normalize=True)
 
 
-def save_model(netG, netD, encoder, decoder, image_encoder, epoch, model_dir):
+def save_model(image_encoder, image_generator, 
+               text_encoder, text_generator, 
+               disc_image, disc_latent,
+               epoch, model_dir):
+    
     torch.save(
-        netG.state_dict(),
-        '%s/netG_epoch_%d.pth' % (model_dir, epoch))
-    torch.save(
-        netD.state_dict(),
-        '%s/netD_epoch_last.pth' % (model_dir))
-    torch.save(
-        encoder.state_dict(),
-        '%s/encoder_epoch_%d.pth' % (model_dir, epoch))    
-    torch.save(
-        decoder.state_dict(),
-        '%s/decoder_epoch_%d.pth' % (model_dir, epoch))    
+        image_generator.state_dict(),
+        '%s/img_gen_epoch_%d.pth' % (model_dir, epoch))
     torch.save(
         image_encoder.state_dict(),
-        '%s/image_encoder_epoch_%d.pth' % (model_dir, epoch))
+        '%s/img_enc_epoch_%d.pth' % (model_dir, epoch))
+    torch.save(
+        text_encoder.state_dict(),
+        '%s/txt_enc_epoch_%d.pth' % (model_dir, epoch))    
+    torch.save(
+        text_generator.state_dict(),
+        '%s/txt_gen_epoch_%d.pth' % (model_dir, epoch))    
+    torch.save(
+        disc_image.state_dict(),
+        '%s/disc_image_epoch_last.pth' % (model_dir))
+    torch.save(
+        disc_latent.state_dict(),
+        '%s/disc_latent_epoch_last.pth' % (model_dir))    
     
     print('Save all models')
 

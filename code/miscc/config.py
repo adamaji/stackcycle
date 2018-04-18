@@ -47,7 +47,7 @@ __C.TRAIN.GENERATOR_LR = 2e-4
 __C.TRAIN.COEFF = edict()
 __C.TRAIN.COEFF.KL = 2.0
 
-# Modal options
+# Model options
 __C.GAN = edict()
 __C.GAN.CONDITION_DIM = 128
 __C.GAN.DF_DIM = 64
@@ -56,6 +56,9 @@ __C.GAN.R_NUM = 4
 
 __C.TEXT = edict()
 __C.TEXT.DIMENSION = 1024
+
+# Ablation options
+__C.AB = edict()
 
 
 def _merge_a_into_b(a, b):

@@ -91,7 +91,6 @@ class TextDataset(data.Dataset):
         caption_dict = {}
         for key in self.filenames:
             caption_name = '%s/text/%s.txt' % (self.data_dir, key)
-            #caption_name = '%s/text/%s.t7' % (self.data_dir, key)
             captions = self.load_captions(caption_name)
             caption_dict[key] = captions
         return caption_dict
@@ -151,7 +150,7 @@ class TextDataset(data.Dataset):
             data_dir = self.data_dir
 
         captions = self.captions[key]
-        #embeddings = self.embeddings[index, :, :]
+
         img_name = '%s/images/%s.jpg' % (data_dir, key)
         img = self.get_img(img_name, bbox)
         
@@ -159,16 +158,10 @@ class TextDataset(data.Dataset):
             pred_cap = self.pred_captions[key]
         else:
             pred_cap = []
-
-        #embedding_ix = random.randint(0, embeddings.shape[0]-1)
-        #embedding = embeddings[embedding_ix, :]
         
         embedding_ix = random.randint(0, len(captions)-1)
         caption = captions[embedding_ix]
-        #print(self.embeddings.shape, len(caption), len(self.filenames))
-        #if self.target_transform is not None:
-        #    embedding = self.target_transform(embedding)
-        #return img, embedding, caption
+
         return (key, cls_id), img, [], caption, pred_cap
 
     def __len__(self):

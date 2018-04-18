@@ -9,10 +9,10 @@ import pdb
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence#, masked_cross_entropy
 
-class EncodingDiscriminator(nn.Module):
+class DiscriminatorLatent(nn.Module):
 
     def __init__(self, emb_dim):
-        super(EncodingDiscriminator, self).__init__()
+        super(DiscriminatorLatent, self).__init__()
 
         self.emb_dim = emb_dim
         self.dis_layers = 3
@@ -28,9 +28,6 @@ class EncodingDiscriminator(nn.Module):
             if i < self.dis_layers:
                 layers.append(nn.LeakyReLU(0.2))
                 layers.append(nn.Dropout(self.dis_dropout))
-                
-        #layers.append(nn.LogSigmoid())
-        #layers.append(nn.Sigmoid())
         
         self.layers = nn.Sequential(*layers)
 
@@ -38,9 +35,12 @@ class EncodingDiscriminator(nn.Module):
         l = self.layers(x)
         return l
 
-class STAGE1_ImageEncoder(nn.Module):
+#
+# image -> (mu, logvar)
+#
+class ImageEncoder(nn.Module):
     def __init__(self):
-        super(STAGE1_ImageEncoder, self).__init__()
+        super(ImageEncoder, self).__init__()
         self.df_dim = cfg.GAN.DF_DIM
         self.ef_dim = cfg.GAN.CONDITION_DIM
         self.batch_size = cfg.TRAIN.BATCH_SIZE
@@ -72,7 +72,6 @@ class STAGE1_ImageEncoder(nn.Module):
         )
         
         self.l1 = nn.Linear(768 * 2 * 2, 300)
-        #self.l2 = nn.Linear(768 * 2 * 2, 300)
         
         self.map_spaces = 9
         self.l2 = nn.Linear(768 * 2 * 2, 300 * self.map_spaces)
@@ -81,11 +80,6 @@ class STAGE1_ImageEncoder(nn.Module):
         
     def forward(self, image):
         encoded = self.encode_img(image)#.view(-1, 64 * 64 * 3))
-        #emb = self.linear(img_embedding.view(-1, 1024))
-        #mu = self.l1(img_embedding.view(-1, 768 * 2 * 2))
-        #logvar = self.l2(img_embedding.view(-1, 768 * 2 * 2))
-        
-        #feats = F.avg_pool2d(features, kernel_size=2)
         
         features = self.l2(encoded.view(-1, 768 * 2 * 2))
         features = features.view(self.map_spaces,-1,300).transpose(0,1)
@@ -96,26 +90,25 @@ class STAGE1_ImageEncoder(nn.Module):
         
         assert features.size(1) == self.map_spaces
         
-        # should return features (for decoding attn), and embedded code (whole thing)
         return features, imcode, c_code, mu, logvar
 
-class EncoderRNN(nn.Module):
+#
+# text -> (mu, logvar)
+#
+class TextEncoder(nn.Module):
     def __init__(self, hidden_size, src_emb, n_layers=1, dropout=0.1):
-        super(EncoderRNN, self).__init__()
+        super(TextEncoder, self).__init__()
         
         self.hidden_size = hidden_size
         self.n_layers = n_layers
         self.dropout = dropout
         
-        #self.embedding = nn.Embedding(input_size, hidden_size)
         self.src_emb = src_emb
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=self.dropout, bidirectional=True)
         
         self.ca_net = CA_NET(300, 300)
         
     def forward(self, input_seqs, input_lengths, hidden=None):
-        # Note: we run this all at once (over multiple batches of multiple sequences)
-        #embedded = self.embedding(input_seqs)
         embedded = self.src_emb(input_seqs)
 
         packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
@@ -127,6 +120,9 @@ class EncoderRNN(nn.Module):
         
         return outputs, hidden, c_code, mu, logvar
     
+#
+#
+#
 class Attn(nn.Module):
     def __init__(self, method, hidden_size):
         super(Attn, self).__init__()
@@ -153,9 +149,13 @@ class Attn(nn.Module):
         # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
         return F.softmax(attn_energies, dim=1).unsqueeze(1)
 
-class LuongAttnDecoderRNN(nn.Module):
+#
+# (mu, logvar) -> text
+#
+# credit: LuongAttnDecoderRNN from pyt tutorial
+class TextGenerator(nn.Module):
     def __init__(self, attn_model, hidden_size, output_size, src_emb, n_layers=1, dropout=0.1):
-        super(LuongAttnDecoderRNN, self).__init__()
+        super(TextGenerator, self).__init__()
 
         # Keep for reference
         self.attn_model = attn_model
@@ -181,14 +181,12 @@ class LuongAttnDecoderRNN(nn.Module):
 
         # Get the embedding of the current input word (last output word)
         batch_size = input_seq.size(0)
-        #embedded = self.embedding(input_seq)
         embedded = self.src_emb(input_seq)
-       
+        
         embedded = self.embedding_dropout(embedded)
         embedded = embedded.view(1, batch_size, self.hidden_size) # S=1 x B x N
 
         # Get current hidden state from input word and last hidden state
-        #self.gru.flatten_parameters()
         rnn_output, hidden = self.gru(embedded, last_hidden)
 
         # Calculate attention from current RNN state and all encoder outputs;
@@ -243,7 +241,9 @@ class ResBlock(nn.Module):
         out = self.relu(out)
         return out
 
-
+#
+# conditioning augmentation
+#
 class CA_NET(nn.Module):
     # some code is modified from vae examples
     # (https://github.com/pytorch/examples/blob/master/vae/main.py)
@@ -307,11 +307,12 @@ class D_GET_LOGITS(nn.Module):
         output = self.outlogits(h_c_code)
         return output.view(-1)
 
-
-# ############# Networks for stageI GAN #############
-class STAGE1_G(nn.Module):
+#
+# (mu, logvar) -> image
+#
+class ImageGenerator(nn.Module):
     def __init__(self):
-        super(STAGE1_G, self).__init__()
+        super(ImageGenerator, self).__init__()
         self.gf_dim = cfg.GAN.GF_DIM * 8
         self.ef_dim = cfg.GAN.CONDITION_DIM
         self.z_dim = cfg.Z_DIM
@@ -359,17 +360,16 @@ class STAGE1_G(nn.Module):
         h_code = self.upsample2(h_code)
         h_code = self.upsample3(h_code)
         h_code = self.upsample4(h_code)
+        
         # state size 3 x 64 x 64
         fake_img = self.img(h_code)
-
-        #fake_img = self.l2(self.r1(self.l1(text_embedding))).view(128, 3, 64, 64)
         
-        return None, fake_img, None, None #mu, logvar
+        return fake_img
 
 
-class STAGE1_D(nn.Module):
+class DiscriminatorImage(nn.Module):
     def __init__(self):
-        super(STAGE1_D, self).__init__()
+        super(DiscriminatorImage, self).__init__()
         self.df_dim = cfg.GAN.DF_DIM
         self.ef_dim = cfg.GAN.CONDITION_DIM
         self.define_module()

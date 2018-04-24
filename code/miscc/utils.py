@@ -38,7 +38,7 @@ def compute_image_gen_loss(image_generator, imgs, latent_code, noise, gpus):
 
     loss = criterion(generated_imgs, imgs)   
     
-    return loss
+    return loss, generated_imgs
 
 #
 # compute generated text loss
@@ -52,6 +52,8 @@ def compute_text_gen_loss(text_generator, inds, latent_code, attn_seq, txt_dico)
 
     max_target_length = inds.size(0)
 
+    seq = torch.cuda.LongTensor([])
+    
     for t in range(max_target_length):
 
         auto_dec_out, auto_dec_hidden, auto_dec_attn = text_generator(
@@ -61,8 +63,11 @@ def compute_text_gen_loss(text_generator, inds, latent_code, attn_seq, txt_dico)
         loss_auto = loss_auto + F.cross_entropy(auto_dec_out, 
                                                 inds[t], ignore_index=txt_dico.PAD_TOKEN)
         auto_dec_inp = inds[t] 
+        
+        topv, topi = auto_dec_out.topk(1, dim=1)    
+        seq = torch.cat((seq, topi.data), dim=1)
     
-    return loss_auto
+    return loss_auto, seq
 
 #
 # unconditional discriminator loss on generated images

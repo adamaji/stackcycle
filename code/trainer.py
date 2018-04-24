@@ -82,6 +82,8 @@ class Trainer(object):
                                   legend=["errD", "uncond", "cond", "latent"])
         self.vis.make_plot_window("KL_loss", num=4, 
                                   legend=["kl", "img", "txt", "fakeimg"])
+        self.vis.make_txt_window("real_captions")
+        self.vis.make_txt_window("genr_captions")
               
     #
     # convert a text sentence into indices
@@ -320,7 +322,7 @@ class Trainer(object):
                 #######################################################
                 # (2b) Calculate auto encoding loss for text
                 ######################################################           
-                loss_auto_txt = compute_text_gen_loss(text_generator, 
+                loss_auto_txt, _ = compute_text_gen_loss(text_generator, 
                                                       inds[:,sort_idx],
                                                       real_txt_code.unsqueeze(0), 
                                                       encoder_out, 
@@ -338,7 +340,7 @@ class Trainer(object):
                 real_img_feats, real_img_emb, real_img_code, real_img_mu, real_img_logvar = real_img_out
 
                 noise.data.normal_(0, 1)
-                loss_auto_img = compute_image_gen_loss(image_generator, 
+                loss_auto_img, _ = compute_image_gen_loss(image_generator, 
                                                        real_imgs[sort_idx],
                                                        real_img_code,
                                                        noise,
@@ -348,7 +350,7 @@ class Trainer(object):
                 # (2c) Decode z from fake imgs and calc cycle loss
                 ######################################################                    
                 
-                loss_cycle_text = compute_text_gen_loss(text_generator, 
+                loss_cycle_text, gen_captions = compute_text_gen_loss(text_generator, 
                                                         inds[:,sort_idx], 
                                                         fake_img_code.unsqueeze(0), 
                                                         fake_img_feats, 
@@ -516,6 +518,20 @@ class Trainer(object):
                 
                     self.vis.show_images("real_im", real_imgs[sort_idx].data.cpu().numpy())
                     self.vis.show_images("fake_im", fake_imgs.data.cpu().numpy())
+                    
+                    sorted_captions = [captions[i] for i in sort_idx.cpu().tolist()]
+                    gen_cap_text = []
+                    for d_i, d in enumerate(gen_captions):
+                        s = u""
+                        for i in d:
+                            if i == self.txt_dico.EOS_TOKEN:
+                                break
+                            if i != self.txt_dico.SOS_TOKEN:
+                                s += self.txt_dico.id2word[i] + u" "
+                        gen_cap_text.append(s)
+                        
+                    self.vis.show_text("real_captions", sorted_captions)
+                    self.vis.show_text("genr_captions", gen_cap_text)
                                                         
                         
 #             # save pred caps for next iteration

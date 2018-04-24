@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--data_dir', dest='data_dir', type=str, default='')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
     parser.add_argument('--supervised', type=bool, default=False)
+    parser.add_argument('--name', type=str, default=None)
     
     args = parser.parse_args()
     return args
@@ -56,7 +57,7 @@ if __name__ == "__main__":
     now = datetime.datetime.now(dateutil.tz.tzlocal())
     timestamp = now.strftime('%Y_%m_%d_%H_%M_%S')
     
-    name = input("Enter a name for this run: ")
+    name = args.name if args.name else input("Enter a name for this run: ")
     
     output_dir = '../output/%s_%s_%s' % \
                  (cfg.DATASET_NAME, cfg.CONFIG_NAME, name)

@@ -35,16 +35,8 @@ from tensorboardX import FileWriter
 
 from nltk import word_tokenize
 
-import visdom
+from visualizer import Visualizer
 
-# normalize imgs to [0,1]
-def normalize(nparr):
-    mn = nparr.min()
-    if mn < 0:
-        nparr = nparr + -1 * mn
-    mx = nparr.max()
-    return nparr / mx
-    
 
 class GANTrainer(object):
     def __init__(self, output_dir):
@@ -77,12 +69,13 @@ class GANTrainer(object):
         self.txt_dico = txt_dico
         self.txt_emb = txt_emb
         
-        self.vis = visdom.Visdom(server='http://bvisionserver9.cs.unc.edu', port=8088, env=output_dir)
-        self.vis_win1 = self.vis.images(np.ones((64,3,64,64)))
-        self.vis_win2 = self.vis.images(np.ones((64,3,64,64)))
-        self.vis_win3 = self.vis.images(np.ones((64,3,64,64)))
-        self.vis_txt1 = self.vis.text('')
-        #self.vis_txt2 = self.vis.text('')
+        # visualizer to visdom server
+        self.vis = Visualizer('http://bvisionserver9.cs.unc.edu', 8088, output_dir)
+        self.vis.make_img_window("real_im")
+        self.vis.make_img_window("fake_im")
+        self.vis.make_plot_window("G_loss", num=4, legend=["errG", "uncond", "cond", "latent"])
+        self.vis.make_plot_window("D_loss", num=4, legend=["errD", "uncond", "cond", "latent"])
+        self.vis.make_plot_window("KL_loss", num=4, legend=["kl", "img", "txt", "fakeimg"])
         
     def ind_from_sent(self, caption):
         return [self.txt_dico.SOS_TOKEN] + [self.txt_dico.word2id[word] if word in self.txt_dico.word2id else self.txt_dico.UNK_TOKEN for word in caption.split(" ")] + [self.txt_dico.EOS_TOKEN]
@@ -515,7 +508,9 @@ class GANTrainer(object):
                 enc_disc_loss_txt =  F.binary_cross_entropy_with_logits( pred_txt.squeeze(), txt_enc_labels)
                 enc_disc_loss_img = F.binary_cross_entropy_with_logits( pred_img.squeeze(), img_enc_labels)
                 
-                errD = errD + errD_im + errD_fake_imgs + enc_disc_loss_txt + enc_disc_loss_img
+                err_latent_disc = enc_disc_loss_txt + enc_disc_loss_img
+                
+                errD = errD + errD_im + errD_fake_imgs + err_latent_disc
                 
                 # check NaN
                 if (errD != errD).data.any():
@@ -573,9 +568,11 @@ class GANTrainer(object):
                 pred_img_g = enc_disc(real_img_emb)
                 
                 enc_fake_loss_txt = F.binary_cross_entropy_with_logits(pred_img_g.squeeze(), txt_enc_labels)
-                enc_fake_loss_img = F.binary_cross_entropy_with_logits(pred_txt_g.squeeze(), img_enc_labels)                
+                enc_fake_loss_img = F.binary_cross_entropy_with_logits(pred_txt_g.squeeze(), img_enc_labels)     
+                
+                err_latent_gen = enc_fake_loss_txt + enc_fake_loss_img
                                 
-                errG_total = 0.5 * errG + kl_loss * cfg.TRAIN.COEFF.KL + 10 * loss_cd + 10 * loss_img + loss_auto + enc_fake_loss_txt + enc_fake_loss_img + loss_cycle_img
+                errG_total = 0.5 * errG + kl_loss * cfg.TRAIN.COEFF.KL + 10 * loss_cd + 10 * loss_img + loss_auto + err_latent_gen + loss_cycle_img
                 
                 # check NaN
                 if (errG_total != errG_total).data.any():
@@ -593,36 +590,30 @@ class GANTrainer(object):
 
                 count = count + 1
                 if i % 100 == 0:
-#                     summary_D = summary.scalar('D_loss', errD.data[0])
-#                     summary_D_r = summary.scalar('D_loss_real', errD_real)
-#                     #summary_D_w = summary.scalar('D_loss_wrong', errD_wrong)
-#                     summary_D_f = summary.scalar('D_loss_fake', errD_fake)
-#                     summary_G = summary.scalar('G_loss', errG.data[0])
-#                     #summary_KL = summary.scalar('KL_loss', kl_loss.data[0])
-
-#                     self.summary_writer.add_summary(summary_D, count)
-#                     self.summary_writer.add_summary(summary_D_r, count)
-#                     #self.summary_writer.add_summary(summary_D_w, count)
-#                     self.summary_writer.add_summary(summary_D_f, count)
-#                     self.summary_writer.add_summary(summary_G, count)
-#                     #self.summary_writer.add_summary(summary_KL, count)
-
-                    # save the image result for each epoch
-                    inputs = (real_txt_code, fixed_noise)
-                    lr_fake, fake, _, _ = \
-                        nn.parallel.data_parallel(netG, inputs, self.gpus)
+                    self.vis.add_to_plot("D_loss", np.asarray([[
+                                                    errD.data[0],
+                                                    errD_im.data[0],
+                                                    errD_fake_imgs.data[0],
+                                                    err_latent_disc.data[0]
+                                                    ]]), 
+                                                    np.asarray([[count] * 4]))
+                    self.vis.add_to_plot("G_loss", np.asarray([[
+                                                    errG_total.data[0], 
+                                                    errG.data[0],
+                                                    errG_fake_imgs.data[0],
+                                                    err_latent_gen.data[0]
+                                                    ]]),
+                                                    np.asarray([[count] * 4]))
+                    self.vis.add_to_plot("KL_loss", np.asarray([[
+                                                    kl_loss.data[0],
+                                                    img_kl_loss.data[0],
+                                                    txt_kl_loss.data[0],
+                                                    f_img_kl_loss.data[0]
+                                                    ]]), 
+                                         np.asarray([[count] * 4]))
                 
-                    self.vis.images(normalize(real_imgs[sort_idx].data.cpu().numpy()), win=self.vis_win1)
-                    self.vis.images(normalize(fake_imgs.data.cpu().numpy()), win=self.vis_win2)
-                    self.vis.text("\n*".join(captions), win=self.vis_txt1)
-                    if (len(pred_cap)):
-                        self.vis.images(normalize(fake_from_fake_img.data.cpu().numpy()), win=self.vis_win3)
-                
-                    #save_img_results(real_imgs[sort_idx].data, fake_from_real_img, epoch, self.image_dir)
-                    #if (len(pred_cap)):
-                    #    save_img_results(None, fake_from_fake_img, epoch, self.image_dir)
-                    #if lr_fake is not None:
-                    #    save_img_results(None, lr_fake, epoch, self.image_dir)
+                    self.vis.show_images("real_im", real_imgs[sort_idx].data.cpu().numpy())
+                    self.vis.show_images("fake_im", fake_imgs.data.cpu().numpy())
                                     
                         
             # save pred caps for next iteration

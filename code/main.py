@@ -63,13 +63,15 @@ if __name__ == "__main__":
                  (cfg.DATASET_NAME, cfg.CONFIG_NAME, name)
 
     num_gpu = len(cfg.GPU_ID.split(','))
+    
+    image_transform = transforms.Compose([
+        transforms.RandomCrop(cfg.IMSIZE),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])    
+    
+    # training
     if cfg.TRAIN.FLAG:
-        
-        image_transform = transforms.Compose([
-            transforms.RandomCrop(cfg.IMSIZE),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
         dataset = TextDataset(cfg.DATA_DIR, 'train',
                               imsize=cfg.IMSIZE,
                               transform=image_transform)
@@ -77,14 +79,6 @@ if __name__ == "__main__":
         dataloader = torch.utils.data.DataLoader(
             dataset, batch_size=cfg.TRAIN.BATCH_SIZE * num_gpu,
             drop_last=True, shuffle=True, num_workers=int(cfg.WORKERS))
-        
-        # dataset = datasets.MNIST('../data', train=False, transform=transforms.Compose([
-        #                transforms.ToTensor(),
-        #                transforms.Normalize((0.1307,), (0.3081,))
-        #            ]))
-        # dataloader = torch.utils.data.DataLoader(
-        #     dataset,
-        #     batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True, num_workers=int(cfg.WORKERS))
 
         if args.supervised:
             print("running supervised")
@@ -92,13 +86,9 @@ if __name__ == "__main__":
         else:
             algo = GANTrainer(output_dir)
         algo.train(dataloader, dataset, cfg.STAGE)
-    else:
-        #datapath= '%s/test/val_captions.t7' % (cfg.DATA_DIR)
-        image_transform = transforms.Compose([
-            transforms.RandomCrop(cfg.IMSIZE),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])        
+    
+    # testing
+    else:      
         dataset = TextDataset(cfg.DATA_DIR, 'test',
                               imsize=cfg.IMSIZE,
                               transform=image_transform)

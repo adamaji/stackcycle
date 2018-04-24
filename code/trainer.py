@@ -243,6 +243,42 @@ class GANTrainer(object):
                         
         return netG, netD, encoder, decoder, image_encoder, e_disc, clf_model
     
+    def define_optimizers(self, 
+                          image_encoder, image_generator, 
+                          text_encoder, text_generator, 
+                          disc_image, disc_latent):
+        
+        optim_disc_img = \
+            optim.Adam(disc_image.parameters(),
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
+            
+        img_gen_params = filter(lambda p: p.requires_grad, image_generator.parameters())
+        optim_img_gen = optim.Adam(img_gen_params,
+                                lr=cfg.TRAIN.GENERATOR_LR,
+                                betas=(0.5, 0.999))
+        
+        optim_fn, optim_params = get_optimizer("adam,lr=0.001")
+        enc_params = filter(lambda p: p.requires_grad, text_encoder.parameters())
+        optim_txt_enc = optim_fn(enc_params, **optim_params)
+        
+        optim_fn, optim_params = get_optimizer("adam,lr=0.001")
+        dec_params = filter(lambda p: p.requires_grad, text_generator.parameters())
+        optim_txt_gen = optim_fn(dec_params, **optim_params)
+        
+        
+        optim_img_enc = \
+            optim.SGD(image_encoder.parameters(),
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR)            
+            
+        optim_disc_latent = \
+            optim.Adam(disc_latent.parameters(),
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
+            
+        return optim_img_enc, optim_img_gen, \
+                optim_txt_enc, optim_txt_gen, \
+                optim_disc_img, optim_disc_latent    
+    
+    
     #
     # do an initial pass for autoencoding and finetuning the classifier model
     #
@@ -269,37 +305,51 @@ class GANTrainer(object):
             noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
             real_labels, fake_labels = real_labels.cuda(), fake_labels.cuda()
 
+#         optimizerD = \
+#             optim.Adam(netD.parameters(),
+#                        lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
+#         netG_para = []
+#         for p in netG.parameters():
+#             if p.requires_grad:
+#                 netG_para.append(p)
+#         optimizerG = optim.Adam(netG_para,
+#                                 lr=cfg.TRAIN.GENERATOR_LR,
+#                                 betas=(0.5, 0.999))
+        
+#         optim_fn, optim_params = get_optimizer("adam,lr=0.001")
+#         enc_params = filter(lambda p: p.requires_grad, encoder.parameters())
+#         enc_optimizer = optim_fn(enc_params, **optim_params)
+#         optim_fn, optim_params = get_optimizer("adam,lr=0.001")
+#         dec_params = filter(lambda p: p.requires_grad, decoder.parameters())
+#         dec_optimizer = optim_fn(dec_params, **optim_params)
+        
+#         # image_enc_optimizer = \
+#         #     optim.Adam(image_encoder.parameters(),
+#         #                lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
+#         image_enc_optimizer = \
+#             optim.SGD(image_encoder.parameters(),
+#                        lr=cfg.TRAIN.DISCRIMINATOR_LR)            
+            
+#         enc_disc_optimizer = \
+#             optim.Adam(enc_disc.parameters(),
+#                        lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
+            
         generator_lr = cfg.TRAIN.GENERATOR_LR
         discriminator_lr = cfg.TRAIN.DISCRIMINATOR_LR
         lr_decay_step = cfg.TRAIN.LR_DECAY_EPOCH
-        optimizerD = \
-            optim.Adam(netD.parameters(),
-                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
-        netG_para = []
-        for p in netG.parameters():
-            if p.requires_grad:
-                netG_para.append(p)
-        optimizerG = optim.Adam(netG_para,
-                                lr=cfg.TRAIN.GENERATOR_LR,
-                                betas=(0.5, 0.999))
         
-        optim_fn, optim_params = get_optimizer("adam,lr=0.001")
-        enc_params = filter(lambda p: p.requires_grad, encoder.parameters())
-        enc_optimizer = optim_fn(enc_params, **optim_params)
-        optim_fn, optim_params = get_optimizer("adam,lr=0.001")
-        dec_params = filter(lambda p: p.requires_grad, decoder.parameters())
-        dec_optimizer = optim_fn(dec_params, **optim_params)
+        optims = self.define_optimizers(image_encoder, netG, 
+                                   encoder, decoder, 
+                                   netD, enc_disc)
+        optim_img_enc, optim_img_gen, optim_txt_enc, optim_txt_gen, optim_disc_img, optim_disc_latent = optims
         
-        # image_enc_optimizer = \
-        #     optim.Adam(image_encoder.parameters(),
-        #                lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
-        image_enc_optimizer = \
-            optim.SGD(image_encoder.parameters(),
-                       lr=cfg.TRAIN.DISCRIMINATOR_LR)            
+        optimizerD = optim_disc_img
+        optimizerG = optim_img_gen
+        enc_optimizer = optim_txt_enc
+        dec_optimizer = optim_txt_gen
+        image_enc_optimizer = optim_img_enc
+        enc_disc_optimizer = optim_disc_latent
             
-        enc_disc_optimizer = \
-            optim.Adam(enc_disc.parameters(),
-                       lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
         
         count = 0
         

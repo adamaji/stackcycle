@@ -16,25 +16,7 @@ class Visualizer(object):
         self.vis = visdom.Visdom(server=servername, port=portnum, env=envname)
         self.vis.close(env=envname)
         self.img_windows = {}  
-        self.plot_windows = {}
-        
-        # w = self.vis.line(
-        #     Y = np.asarray([[1,2,3,4,5]]),
-        #     X = np.asarray([[1,1,1,1,1]])
-        # )
-        # self.vis.line(
-        #     Y = np.asarray([[2,3,4,5,6]]),
-        #     X = np.asarray([[2,2,2,2,2]]),
-        #     win = w,
-        #     update = 'append'
-        # )
-        # self.vis.line(
-        #     Y = np.asarray([[2,3,4,5,6]]),
-        #     X = np.asarray([[3,3,3,3,3]]),
-        #     win = w,
-        #     update = 'append'
-        # )        
-        
+        self.plot_windows = {}      
         
     def make_img_window(self, key):
         self.img_windows[key] = self.vis.images(np.ones((64,3,64,64)))

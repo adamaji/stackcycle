@@ -165,8 +165,7 @@ def compute_uncond_generator_loss(netD, fake_imgs, real_labels, gpus):
 def compute_cond_generator_loss(netD, fake_imgs, real_labels, conditions, gpus):
     criterion = nn.BCEWithLogitsLoss()
     
-    #cond = conditions.detach()
-    cond = conditions
+    cond = conditions.detach()
     fake_features = nn.parallel.data_parallel(netD, (fake_imgs), gpus)
     
     #fake pairs

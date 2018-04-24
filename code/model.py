@@ -286,12 +286,13 @@ class D_GET_LOGITS(nn.Module):
                 conv3x3(ndf * 8 + nef, ndf * 8),
                 nn.BatchNorm2d(ndf * 8),
                 nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=4),
-                nn.Sigmoid())
+                nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=4)
+                #nn.Sigmoid())
+            )
         else:
             self.outlogits = nn.Sequential(
-                nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=4),
-                #nn.Sigmoid())
+                nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=4)
+                #nn.Sigmoid()
             )
 
     def forward(self, h_code, c_code=None):
@@ -350,9 +351,7 @@ class ImageGenerator(nn.Module):
         self.l2 = nn.Linear(1024, 64 * 64 * 3)
 
     def forward(self, c_code, noise):
-        #c_code, mu, logvar = self.ca_net(text_embedding)
         z_c_code = torch.cat((noise, c_code), 1)
-        #z_c_code = text_embedding
         h_code = self.fc(z_c_code)
 
         h_code = h_code.view(-1, self.gf_dim, 4, 4)

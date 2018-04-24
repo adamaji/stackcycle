@@ -76,9 +76,12 @@ class Trainer(object):
         self.vis = Visualizer('http://bvisionserver9.cs.unc.edu', 8088, output_dir)
         self.vis.make_img_window("real_im")
         self.vis.make_img_window("fake_im")
-        self.vis.make_plot_window("G_loss", num=4, legend=["errG", "uncond", "cond", "latent"])
-        self.vis.make_plot_window("D_loss", num=4, legend=["errD", "uncond", "cond", "latent"])
-        self.vis.make_plot_window("KL_loss", num=4, legend=["kl", "img", "txt", "fakeimg"])
+        self.vis.make_plot_window("G_loss", num=7, 
+                                  legend=["errG", "uncond", "cond", "latent", "cycltxt", "autoimg", "autotxt"])
+        self.vis.make_plot_window("D_loss", num=4, 
+                                  legend=["errD", "uncond", "cond", "latent"])
+        self.vis.make_plot_window("KL_loss", num=4, 
+                                  legend=["kl", "img", "txt", "fakeimg"])
               
     #
     # convert a text sentence into indices
@@ -199,7 +202,7 @@ class Trainer(object):
             optim.Adam(disc_image.parameters(),
                        lr=cfg.TRAIN.DISCRIMINATOR_LR, betas=(0.5, 0.999))
             
-        img_gen_params = filter(lambda p: p.requires_grad, image_encoder.parameters())
+        img_gen_params = filter(lambda p: p.requires_grad, image_generator.parameters())
         optim_img_gen = optim.Adam(img_gen_params,
                                 lr=cfg.TRAIN.GENERATOR_LR,
                                 betas=(0.5, 0.999))
@@ -306,7 +309,7 @@ class Trainer(object):
                 inputs = (real_txt_code, noise)
                 fake_imgs = \
                     nn.parallel.data_parallel(image_generator, inputs, self.gpus)
-                    
+                                        
                 fake_img_out = nn.parallel.data_parallel(
                     image_encoder, (fake_imgs), self.gpus
                 )
@@ -394,7 +397,7 @@ class Trainer(object):
                 errD = 0
                 
                 errD_fake_imgs = compute_cond_discriminator_loss(disc_image, fake_imgs, 
-                                                   fake_labels, real_txt_code, self.gpus)               
+                                                   fake_labels, encoder_hidden[0], self.gpus)               
                 
                 errD_im, errD_real, errD_fake = \
                     compute_uncond_discriminator_loss(disc_image, real_imgs, fake_imgs,
@@ -420,6 +423,8 @@ class Trainer(object):
                     exit()
                     
                 errD.backward()
+                #temp_errD = errD_fake_imgs + errD_im
+                #temp_errD.backward()
                                 
                 optim_disc_img.step()
                 optim_disc_latent.step()
@@ -474,6 +479,8 @@ class Trainer(object):
                     exit()
                 
                 errG_total.backward()
+                #temp_errG = err_g_uncond_loss + err_g_cond_disc_loss + img_kl_loss
+                #temp_errG.backward()
                 
                 optim_img_enc.step()
                 optim_img_gen.step()
@@ -493,9 +500,12 @@ class Trainer(object):
                                                     errG.data[0], 
                                                     err_g_uncond_loss.data[0],
                                                     err_g_cond_disc_loss.data[0],
-                                                    err_latent_gen.data[0]
+                                                    err_latent_gen.data[0],
+                                                    loss_cycle_text.data[0],
+                                                    loss_auto_img.data[0],
+                                                    loss_auto_txt.data[0]
                                                     ]]),
-                                                    np.asarray([[count] * 4]))
+                                                    np.asarray([[count] * 7]))
                     self.vis.add_to_plot("KL_loss", np.asarray([[
                                                     kl_loss.data[0],
                                                     img_kl_loss.data[0],

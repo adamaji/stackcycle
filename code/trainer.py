@@ -37,6 +37,8 @@ from model import ImageGenerator, ImageEncoder
 from model import TextGenerator, TextEncoder
 from model import DiscriminatorLatent, DiscriminatorImage
 
+from evaluation.evaluator import Evaluator
+
 from visualizer import Visualizer
 
 from tensorboardX import summary
@@ -63,7 +65,7 @@ class Trainer(object):
         torch.cuda.set_device(self.gpus[0])
         cudnn.benchmark = True
         
-        #path = "../data/birds/birds.en.vec"
+        # load fasttext embeddings (e.g., birds.en.vec)
         path = os.path.join(cfg.DATA_DIR, cfg.DATASET_NAME + ".en.vec")
         txt_dico, _txt_emb = load_external_embeddings(path)
         txt_emb = nn.Embedding(len(txt_dico), 300, sparse=False)
@@ -72,18 +74,25 @@ class Trainer(object):
         self.txt_dico = txt_dico
         self.txt_emb = txt_emb
         
+        # load networks and evaluator
+        self.networks = self.load_network()
+        self.evaluator = Evaluator(self.networks, self.txt_emb)
+        
         # visualizer to visdom server
         self.vis = Visualizer('http://bvisionserver9.cs.unc.edu', 8088, output_dir)
         self.vis.make_img_window("real_im")
         self.vis.make_img_window("fake_im")
+        self.vis.make_txt_window("real_captions")
+        self.vis.make_txt_window("genr_captions")        
         self.vis.make_plot_window("G_loss", num=7, 
                                   legend=["errG", "uncond", "cond", "latent", "cycltxt", "autoimg", "autotxt"])
         self.vis.make_plot_window("D_loss", num=4, 
                                   legend=["errD", "uncond", "cond", "latent"])
         self.vis.make_plot_window("KL_loss", num=4, 
                                   legend=["kl", "img", "txt", "fakeimg"])
-        self.vis.make_txt_window("real_captions")
-        self.vis.make_txt_window("genr_captions")
+        
+        self.vis.make_plot_window("inception_score", num=2,
+                                 legend=["real", "fake"])
               
     #
     # convert a text sentence into indices
@@ -235,7 +244,7 @@ class Trainer(object):
     #
     def train(self, data_loader, dataset, stage=1):
         
-        image_encoder, image_generator, text_encoder, text_generator, disc_image, disc_latent = self.load_network()
+        image_encoder, image_generator, text_encoder, text_generator, disc_image, disc_latent = self.networks
                            
         nz = cfg.Z_DIM
         batch_size = self.batch_size
@@ -593,6 +602,14 @@ class Trainer(object):
             )
                 
             print("%s %s, %s" % (prefix, gen_str, dis_str))
+            
+            iscore_mu_real, _ = self.evaluator.inception_score(real_imgs[sort_idx])
+            iscore_mu_fake, _ = self.evaluator.inception_score(fake_imgs)
+            self.vis.add_to_plot("inception_score", np.asarray([[
+                        iscore_mu_real,
+                        iscore_mu_fake
+                    ]]),
+                    np.asarray([[epoch] * 2]))
             
             if epoch % self.snapshot_interval == 0:
                 save_model(image_encoder, image_generator, 

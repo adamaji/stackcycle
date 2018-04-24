@@ -91,7 +91,8 @@ if __name__ == "__main__":
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])                        
-                        
+              
+    # training
     if cfg.TRAIN.FLAG:
         dataset = TextDataset(cfg.DATA_DIR, 'train',
                               imsize=cfg.IMSIZE,
@@ -103,7 +104,8 @@ if __name__ == "__main__":
 
         algo = Trainer(output_dir)
         algo.train(dataloader, dataset, cfg.STAGE)
-                        
+         
+    # testing
     else:    
         dataset = TextDataset(cfg.DATA_DIR, 'test',
                               imsize=cfg.IMSIZE,

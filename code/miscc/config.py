@@ -60,6 +60,11 @@ __C.TEXT.DIMENSION = 1024
 # Ablation options
 __C.AB = edict()
 
+# Eval options
+
+__C.EVAL = edict()
+__C.EVAL.INCEPTION_CKPT = "./evaluation/inceptionscore/inception_finetuned_models/birds_valid299/model.ckpt"
+
 
 def _merge_a_into_b(a, b):
     """Merge config dictionary a into config dictionary b, clobbering the

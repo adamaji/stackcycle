@@ -93,6 +93,7 @@ class Trainer(object):
         
         self.vis.make_plot_window("inception_score", num=2,
                                  legend=["real", "fake"])
+        self.vis.make_plot_window("r_precision", num=1)
               
     #
     # convert a text sentence into indices
@@ -229,7 +230,7 @@ class Trainer(object):
         
         optim_img_enc = \
             optim.SGD(image_encoder.parameters(),
-                       lr=cfg.TRAIN.DISCRIMINATOR_LR)            
+                       lr=cfg.TRAIN.DISCRIMINATOR_LR)
             
         optim_disc_latent = \
             optim.Adam(disc_latent.parameters(),
@@ -541,6 +542,9 @@ class Trainer(object):
                         
                     self.vis.show_text("real_captions", sorted_captions)
                     self.vis.show_text("genr_captions", gen_cap_text)
+                    
+                    r_precision = self.evaluator.r_precision_score(fake_img_code, real_txt_code)
+                    self.vis.add_to_plot("r_precision", np.asarray([r_precision.data[0]]), np.asarray([count]))
                                                         
                         
 #             # save pred caps for next iteration
@@ -585,7 +589,16 @@ class Trainer(object):
 #                     seq = torch.cat((seq, cap_dec_inp.data), dim=1)
 
 #                 dataset.save_captions(keys, seq.cpu(), lengths.cpu())
+
+            #self.evaluator.run_all_eval()
             
+            iscore_mu_real, _ = self.evaluator.inception_score(real_imgs[sort_idx])
+            iscore_mu_fake, _ = self.evaluator.inception_score(fake_imgs)
+            self.vis.add_to_plot("inception_score", np.asarray([[
+                        iscore_mu_real,
+                        iscore_mu_fake
+                    ]]),
+                    np.asarray([[epoch] * 2]))    
             
             end_t = time.time()
             
@@ -600,16 +613,14 @@ class Trainer(object):
                 errD.data[0], 
                 err_latent_disc.data[0]
             )
-                
-            print("%s %s, %s" % (prefix, gen_str, dis_str))
             
-            iscore_mu_real, _ = self.evaluator.inception_score(real_imgs[sort_idx])
-            iscore_mu_fake, _ = self.evaluator.inception_score(fake_imgs)
-            self.vis.add_to_plot("inception_score", np.asarray([[
-                        iscore_mu_real,
-                        iscore_mu_fake
-                    ]]),
-                    np.asarray([[epoch] * 2]))
+            eval_str = "Incep real: %.3f Incep fake: %.3f R prec %.3f" % (
+                iscore_mu_real, 
+                iscore_mu_fake,
+                r_precision
+            )
+                
+            print("%s %s, %s; %s" % (prefix, gen_str, dis_str, eval_str))
             
             if epoch % self.snapshot_interval == 0:
                 save_model(image_encoder, image_generator, 

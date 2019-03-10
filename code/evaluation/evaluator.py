@@ -5,8 +5,12 @@ import os
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from torch.nn import functional as F
+import torchvision.transforms as transforms
 
 from miscc.config import cfg
+from miscc.utils import load_external_embeddings
+from miscc.datasets import TextDataset
 
 # inception score
 import tensorflow as tf
@@ -28,10 +32,75 @@ class Evaluator(object):
         image_encoder, image_generator, text_encoder, text_generator, disc_image, disc_latent = networks
         
         self.txt_emb = txt_emb
-        self.txt_encoder = text_encoder
-        self.txt_generator = text_generator
-        self.img_encoder = image_encoder
-        self.img_generator = image_generator
+        self.text_encoder = text_encoder
+        self.text_generator = text_generator
+        self.image_encoder = image_encoder
+        self.image_generator = image_generator
+        
+        # load fasttext embeddings (e.g., birds.en.vec)
+        path = os.path.join(cfg.DATA_DIR, cfg.DATASET_NAME + ".en.vec")
+        txt_dico, _txt_emb = load_external_embeddings(path)
+        txt_emb = nn.Embedding(len(txt_dico), 300, sparse=False)
+        txt_emb.weight.data.copy_(_txt_emb)
+        txt_emb.weight.requires_grad = False
+        self.txt_dico = txt_dico
+        self.txt_emb = txt_emb        
+        
+        image_transform = transforms.Compose([
+            transforms.RandomCrop(cfg.IMSIZE),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])        
+        
+        dataset = TextDataset(cfg.DATA_DIR, 'test',
+                              imsize=cfg.IMSIZE,
+                              transform=image_transform)
+        assert dataset
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=10,
+            drop_last=True, shuffle=True, num_workers=int(cfg.WORKERS))
+        
+        self.dataloader = dataloader
+        
+        s_gpus = cfg.GPU_ID.split(',')
+        self.gpus = [int(ix) for ix in s_gpus] # 0        
+        
+        
+    #
+    # convert a text sentence into indices
+    #
+    def ind_from_sent(self, caption):
+        s = [self.txt_dico.SOS_TOKEN]
+        s += [self.txt_dico.word2id[word] \
+            if word in self.txt_dico.word2id \
+            else self.txt_dico.UNK_TOKEN for word in caption.split(" ")]
+        s += [self.txt_dico.EOS_TOKEN]
+        return s
+    
+    #
+    # pad a sequence with PAD TOKENs
+    #
+    def pad_seq(self, seq, max_length):
+        seq += [self.txt_dico.PAD_TOKEN for i in range(max_length - len(seq))]
+        return seq 
+    
+    #
+    # convert a list of sentences into a padded tensor w lengths
+    #
+    def process_captions(self, captions):
+        seqs = []
+        for i in range(len(captions)):
+            seqs.append(self.ind_from_sent(captions[i]))
+                        
+        input_lengths = [len(s) for s in seqs]
+        padded = [self.pad_seq(s, max(input_lengths)) for s in seqs]
+                        
+        input_var = Variable(torch.LongTensor(padded)).transpose(0, 1)
+        lengths = torch.LongTensor(input_lengths)
+        if cfg.CUDA:
+            input_var = input_var.cuda()
+            lengths = lengths.cuda()
+        return input_var, lengths        
     
     ################################
     # image generation evaluations
@@ -112,9 +181,35 @@ class Evaluator(object):
         
     #
     # R-precision
+    # args: fake images, captions used to generate them
     #
-    def r_precision_score(self, log):
-        print("todo")
+    def r_precision_score(self, images_code, captions_code, R=1, etc=99):
+        
+        # see if top-1 query out of 100 can make it... over 30000 generated images
+                        
+        r_precision = 0
+        for im_idx, im_c in enumerate(images_code):         
+            
+            # when we have 30000
+            #perm = torch.randperm(captions_code.size(0))
+            #cap_idx = perm[:k]
+            #candidates = captions_code[cap_idx]
+            
+            candidates = captions_code
+                
+            cos = F.cosine_similarity(im_c.unsqueeze(0).repeat(64,1), candidates)
+            
+            _, sort_idx = cos.sort(0, descending=True)
+                        
+            # check top-1
+            r_precision += (sort_idx == im_idx)[0]
+                
+        r_precision = r_precision.float()
+        r_precision /= images_code.size(0)
+        
+        return r_precision
+                
+            
     
     ################################
     # image captioning evaluations
@@ -135,6 +230,60 @@ class Evaluator(object):
     #
     # run all evaluations
     #
-    def run_all_eval(self, log):
-        self.bleu1(log)
+    def run_all_eval(self):
+        
+        # generate 30K fake images for eval
+        
+        all_fake_imgs = []
+        all_fake_img_codes = []
+        all_caption_codes = []
+        
+        for i, data in enumerate(self.dataloader, 0):
+            
+            nz = cfg.Z_DIM
+            batch_size = 10
+            
+            if i * batch_size > 30000:
+                break
+            
+            _, real_img_cpu, _, captions, pred_cap = data      
+            
+            noise = Variable(torch.FloatTensor(batch_size, nz))
+            fixed_noise = \
+                Variable(torch.FloatTensor(batch_size, nz).normal_(0, 1),
+                         volatile=True)            
+            
+            raw_inds, raw_lengths = self.process_captions(captions)
+
+            inds, lengths = raw_inds.data, raw_lengths
+
+            inds = Variable(inds)
+            lens_sort, sort_idx = lengths.sort(0, descending=True)
+
+            # need to dataparallel the encoders?
+            txt_encoder_output = self.text_encoder(inds[:, sort_idx], lens_sort.cpu().numpy(), None)
+            encoder_out, encoder_hidden, real_txt_code, real_txt_mu, real_txt_logvar = txt_encoder_output      
+            
+            real_imgs = Variable(real_img_cpu)
+            if cfg.CUDA:
+                real_imgs = real_imgs.cuda()   
+                
+            noise.data.normal_(0, 1)
+            inputs = (real_txt_code, noise)
+            fake_imgs = \
+                nn.parallel.data_parallel(self.image_generator, inputs, self.gpus)
+            fake_img_out = nn.parallel.data_parallel(
+                self.image_encoder, (fake_imgs), self.gpus
+            )
+
+            fake_img_feats, fake_img_emb, fake_img_code, fake_img_mu, fake_img_logvar = fake_img_out
+            fake_img_feats = fake_img_feats.transpose(0,1)     
+                
+            all_fake_imgs.append(fake_imgs.cpu())
+            all_fake_img_codes.append(fake_img_code.cpu())
+            all_caption_codes.append(real_txt_code.cpu())
+                
+        pdb.set_trace()
+                
+        
         

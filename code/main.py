@@ -31,21 +31,21 @@ def parse_args():
     parser.add_argument('--supervised', type=bool, default=False)
     parser.add_argument('--name', type=str, default=None)
     
-    # we can make ablations more sophisticated later...
-    # need:
-    #  -imgcycle
-    #  -txtcycle
-    #  -imgauto
-    #  -txtauto
-    #  -spvimgtxt
-    #  -spvtxtimg
-    parser.add_argument('--imgcycle', type=bool, default=False)
-    parser.add_argument('--txtcycle', type=bool, default=False)
-    parser.add_argument('--imgauto', type=bool, default=False)
-    parser.add_argument('--txtauto', type=bool, default=False)
-    parser.add_argument('--spvimgtxt', type=bool, default=False)
-    parser.add_argument('--spvtxtimg', type=bool, default=False)
-    parser.add_argument('--disclatent', type=bool, default=False)
+    # ablation args for evaluation, unused
+    parser.add_argument('--imgcycle', type=bool, default=False, 
+        help='ablation: image cyclic reconstruction loss')
+    parser.add_argument('--txtcycle', type=bool, default=False, 
+        help='ablation: text cyclic reconstruction loss')
+    parser.add_argument('--imgauto', type=bool, default=False, 
+        help='ablation: image reconstruction loss')
+    parser.add_argument('--txtauto', type=bool, default=False, 
+        help='ablation: text reconstruction loss')
+    parser.add_argument('--spvimgtxt', type=bool, default=False, 
+        help='ablation: supervised image to text')
+    parser.add_argument('--spvtxtimg', type=bool, default=False,
+        help='ablation: supervised text to image')
+    parser.add_argument('--disclatent', type=bool, default=False,
+        help='ablation: latent discriminator')
     
     args = parser.parse_args()
     return args

@@ -1,6 +1,7 @@
 import pdb
 import numpy as np
 import os
+import operator
 
 import torch
 import torch.nn as nn
@@ -28,7 +29,9 @@ def normalize255(nparr):
 class Evaluator(object):
     
     def __init__(self, networks, txt_emb):
-        
+        # builds an evaluator for running tests on model
+        # most of this is not yet functional -- pulled from notebooks
+           
         image_encoder, image_generator, text_encoder, text_generator, disc_image, disc_latent = networks
         
         self.txt_emb = txt_emb
@@ -118,19 +121,6 @@ class Evaluator(object):
         s_gpus = cfg.GPU_ID.split(',')
         gpus = [int(ix) for ix in s_gpus] # 0
         
-#         noise = Variable(torch.FloatTensor(batch_size, nz))
-#         fixed_noise = \
-#             Variable(torch.FloatTensor(batch_size, nz).normal_(0, 1),
-#                      volatile=True)
-
-#         txt_encoder_output = self.txt_encoder(caption_inds, caption_lens.cpu().numpy(), None)
-#         encoder_out, encoder_hidden, real_txt_code, real_txt_mu, real_txt_logvar = txt_encoder_output
-        
-#         noise.data.normal_(0, 1)
-#         inputs = (real_txt_code, noise)
-#         fake_imgs = \
-#             nn.parallel.data_parallel(self.img_generator, inputs, gpus)
-            
             
         # modified from main func in inception_score.py
         
@@ -185,18 +175,10 @@ class Evaluator(object):
     #
     def r_precision_score(self, images_code, captions_code, R=1, etc=99):
         
-        # see if top-1 query out of 100 can make it... over 30000 generated images
-                        
         r_precision = 0
         for im_idx, im_c in enumerate(images_code):         
             
-            # when we have 30000
-            #perm = torch.randperm(captions_code.size(0))
-            #cap_idx = perm[:k]
-            #candidates = captions_code[cap_idx]
-            
             candidates = captions_code
-                
             cos = F.cosine_similarity(im_c.unsqueeze(0).repeat(64,1), candidates)
             
             _, sort_idx = cos.sort(0, descending=True)
@@ -210,7 +192,83 @@ class Evaluator(object):
         return r_precision
                 
             
+    #
+    # top-k retrieval
+    # args: topk
+    # TODO: pulled from notebook, need to refactor and make efficient..
+    #
+    def top_k_retrieval(self, topk=10):
+
+        # count class instances to average text embeddings
+        class_count = {}
+        for i, data in enumerate(self.dataloader, 0):
+            (key, cls_id), real_img_cpu, _, captions, pred_cap = data
+            for k in key:
+                idx = k.split("/")[0]
+                if idx not in class_count:
+                    class_count[idx] = 0
+                class_count[idx] += 1
+
+        # extract embeddings for each sentence,
+        embs = {}
+        for i, data in enumerate(self.dataloader, 0):
+            (key, cls_id), real_img_cpu, _, captions, pred_cap = data    
+            idxs = key
+            
+            inds, lengths = process_captions(captions)
+            lens_sort, sort_idx = lengths.sort(0, descending=True)
+            encoder_output = txt_encoder(inds[:, sort_idx][:,:].cuda(), lens_sort[:].cpu().numpy(), None)
+            encoder_out, encoder_hidden, enc_txt_code, enc_txt_mu, enc_txt_logvar = encoder_output
+            
+            for b in range(len(enc_txt_code)):
+                k = idxs[sort_idx[b]]
+                txt_vec = encoder_out[0,b]
+                if k not in embs:
+                    embs[k] = txt_vec
+                else:
+                    embs[k] = embs[k] + txt_vec
+                    pass
+
+        # and average per class
+        avg_embs = {}
+        for key in embs:
+            avg_embs[key] = embs[key] / class_count[key]
     
+
+        # extract image embeddings and compare to each class embedding
+        cos = nn.CosineSimilarity(dim=0, eps=1e-6)
+        pairs = {}
+        for i, data in enumerate(self.dataloader, 0):
+            (key, cls_id), real_img_cpu, _, captions, pred_cap = data
+            idxs = key
+            
+            img_out = img_encoder(Variable(real_img_cpu[sort_idx].cuda()))
+            real_img_feats, real_img_emb, real_img_code, real_img_mu, real_img_logvar = img_out   
+                
+            for b in range(len(real_img_code)):
+                k = idxs[sort_idx[b]]
+                highest = 0
+                hkey = None
+                
+                for key in avg_embs:
+                    avg = avg_embs[key]
+                    
+                    img_vec = real_img_feats[b,0]
+                    
+                    score = cos(avg, img_vec).data.cpu().numpy()[0]
+                    
+                    if key not in pairs: pairs[key] = []
+                    pairs[key].append((k, score))
+
+        ap_total = 0
+        for k in pairs:
+            pairs[k].sort(key=operator.itemgetter(1), reverse=False)
+            ap = sum([p[0]==k for p in pairs[k][:int(topk)]])
+            ap_total += ap / topk
+
+        ap_k = ap_total / len(pairs)
+        return ap_k
+
     ################################
     # image captioning evaluations
     ################################
@@ -282,8 +340,5 @@ class Evaluator(object):
             all_fake_imgs.append(fake_imgs.cpu())
             all_fake_img_codes.append(fake_img_code.cpu())
             all_caption_codes.append(real_txt_code.cpu())
-                
-        pdb.set_trace()
-                
         
         

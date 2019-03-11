@@ -79,7 +79,7 @@ class Trainer(object):
         self.evaluator = Evaluator(self.networks, self.txt_emb)
         
         # visualizer to visdom server
-        self.vis = Visualizer('http://bvisionserver9.cs.unc.edu', 8088, output_dir)
+        self.vis = Visualizer(cfg.VISDOM_HOST, cfg.VISDOM_PORT, output_dir)
         self.vis.make_img_window("real_im")
         self.vis.make_img_window("fake_im")
         self.vis.make_txt_window("real_captions")
@@ -373,32 +373,32 @@ class Trainer(object):
                 ###############################################################
                 
                 loss_cycle_img = 0
-#                 if (len(pred_cap)):
-#                     pred_inds, pred_lens = pred_cap
-#                     pred_inds = Variable(pred_inds.transpose(0,1))
-#                     pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
+                if (len(pred_cap)):
+                    pred_inds, pred_lens = pred_cap
+                    pred_inds = Variable(pred_inds.transpose(0,1))
+                    pred_inds = pred_inds.cuda() if cfg.CUDA else pred_inds
 
-#                     pred_output = encoder(pred_inds[:, sort_idx], pred_lens.cpu().numpy(), None)
-#                     pred_txt_out, pred_txt_hidden, pred_txt_code, pred_txt_mu, pred_txt_logvar = pred_output
-                    
-#                     noise.data.normal_(0, 1)
-#                     inputs = (pred_txt_code, noise)
-#                     _, fake_from_fake_img, mu, logvar = \
-#                         nn.parallel.data_parallel(netG, inputs, self.gpus)
-                    
-#                     pred_img_out = nn.parallel.data_parallel(
-#                         image_encoder, (fake_from_fake_img), self.gpus
-#                     )                    
-                    
-#                     pred_img_feats, pred_img_emb, pred_img_code, pred_img_mu, pred_img_logvar = pred_img_out
-                    
-#                     semantic_target = Variable(torch.ones(batch_size))
-#                     if cfg.CUDA:
-#                         semantic_target = semantic_target.cuda()
-                                                
-#                     loss_cycle_img = cosine_emb_loss(
-#                         pred_img_feats.contiguous().view(batch_size, -1), real_img_feats.contiguous().view(batch_size, -1), semantic_target
-#                     )
+                    pred_output = encoder(pred_inds[:, sort_idx], pred_lens.cpu().numpy(), None)
+                    pred_txt_out, pred_txt_hidden, pred_txt_code, pred_txt_mu, pred_txt_logvar = pred_output
+                  
+                    noise.data.normal_(0, 1)
+                    inputs = (pred_txt_code, noise)
+                    _, fake_from_fake_img, mu, logvar = \
+                        nn.parallel.data_parallel(netG, inputs, self.gpus)
+                  
+                    pred_img_out = nn.parallel.data_parallel(
+                        image_encoder, (fake_from_fake_img), self.gpus
+                    )                    
+                  
+                    pred_img_feats, pred_img_emb, pred_img_code, pred_img_mu, pred_img_logvar = pred_img_out
+                  
+                    semantic_target = Variable(torch.ones(batch_size))
+                    if cfg.CUDA:
+                        semantic_target = semantic_target.cuda()
+                                              
+                    loss_cycle_img = cosine_emb_loss(
+                        pred_img_feats.contiguous().view(batch_size, -1), real_img_feats.contiguous().view(batch_size, -1), semantic_target
+                    )
                 
                 ###########################
                 # (3) Update D network
@@ -421,10 +421,10 @@ class Trainer(object):
                                                                     img_enc_labels, txt_enc_labels,
                                                                     self.gpus)
                 
-                # if (len(pred_cap)):
-                #     errD_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
-                #                                                  fake_labels, pred_txt_hidden[0], self.gpus)
-                #     errD += errD_fake_from_fake_imgs                 
+                if (len(pred_cap)):
+                    errD_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
+                                                                 fake_labels, pred_txt_hidden[0], self.gpus)
+                    errD += errD_fake_from_fake_imgs                 
                 
                 errD = errD + errD_im + errD_fake_imgs + err_latent_disc
                 
@@ -435,15 +435,9 @@ class Trainer(object):
                     exit()
                     
                 errD.backward()
-                #temp_errD = errD_fake_imgs + errD_im
-                #temp_errD.backward()
                                 
                 optim_disc_img.step()
                 optim_disc_latent.step()
-                
-                # for n,p in disc_image.named_parameters():
-                #     if "encode_img" in n:
-                #         print('===========\ngradient:{}\n----------\n{}'.format(n,p.grad))                
                 
                 ############################
                 # (2) Update G network
@@ -471,10 +465,10 @@ class Trainer(object):
                         loss_auto_img + \
                         loss_auto_txt
                 
-                # if (len(pred_cap)):
-                #     errG_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
-                #                                                  real_labels, pred_txt_hidden[0], self.gpus)
-                #     errG += errG_fake_from_fake_imgs                
+                if (len(pred_cap)):
+                    errG_fake_from_fake_imgs = compute_cond_disc(netD, fake_from_fake_img, 
+                                                                 real_labels, pred_txt_hidden[0], self.gpus)
+                    errG += errG_fake_from_fake_imgs                
                 
                 img_kl_loss = KL_loss(real_img_mu, real_img_logvar)
                 txt_kl_loss = KL_loss(real_txt_mu, real_txt_logvar)
@@ -491,8 +485,6 @@ class Trainer(object):
                     exit()
                 
                 errG_total.backward()
-                #temp_errG = err_g_uncond_loss + err_g_cond_disc_loss + img_kl_loss
-                #temp_errG.backward()
                 
                 optim_img_enc.step()
                 optim_img_gen.step()
@@ -590,8 +582,6 @@ class Trainer(object):
 
 #                 dataset.save_captions(keys, seq.cpu(), lengths.cpu())
 
-            #self.evaluator.run_all_eval()
-            
             iscore_mu_real, _ = self.evaluator.inception_score(real_imgs[sort_idx])
             iscore_mu_fake, _ = self.evaluator.inception_score(fake_imgs)
             self.vis.add_to_plot("inception_score", np.asarray([[
